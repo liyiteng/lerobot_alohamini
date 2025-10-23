@@ -20,6 +20,8 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
+    parser.add_argument("--dataset", type=str, required=True,
+                    help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
     parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to record")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second")
     parser.add_argument("--episode_time", type=int, default=60, help="Duration of each episode (seconds)")
@@ -50,7 +52,7 @@ def main():
     dataset_features = {**action_features, **obs_features}
 
     dataset = LeRobotDataset.create(
-        repo_id=f"liyitenga/record_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        repo_id=args.dataset,
         fps=args.fps,
         features=dataset_features,
         robot_type=robot.name,
