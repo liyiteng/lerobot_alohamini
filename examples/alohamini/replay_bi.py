@@ -12,10 +12,15 @@ parser.add_argument("--dataset", type=str, required=True,
                     help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
 parser.add_argument("--episode", type=int, default=0,
                     help="Episode index to replay (default 0)")
+parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
+parser.add_argument("--robot_id", type=str, default="lekiwi", help="Robot ID")
+
+
+
 args = parser.parse_args()
 
 
-robot_config = LeKiwiClientConfig(remote_ip="192.168.50.43", id="my_lekiwi")
+robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
 robot = LeKiwiClient(robot_config)
 
 

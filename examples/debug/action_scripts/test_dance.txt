@@ -1,0 +1,148 @@
+sleep, 1
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} - 700
+
+
+elbow_flex, read, ID
+elbow_flex, read, Present_Position
+elbow_flex, write, Goal_Position, {Present_Position} - 700
+
+
+sleep, 0.8
+
+shoulder_lift, read, ID
+shoulder_lift, read, Present_Position
+shoulder_lift, write, Goal_Position, {Present_Position} + 600
+
+sleep, 0.8
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} - 300
+
+
+sleep, 0.3
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} - 300
+
+
+sleep, 0.3
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+
+
+sleep, 0.3
+
+shoulder_pan, read, ID
+shoulder_pan, read, Present_Position
+shoulder_pan, write, Goal_Position, {Present_Position} + 800
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+
+
+sleep, 0.3
+
+shoulder_pan, read, ID
+shoulder_pan, read, Present_Position
+shoulder_pan, write, Goal_Position, {Present_Position} - 1600
+
+sleep, 0.6
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} + 300
+
+sleep, 0.3
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, {Present_Position} - 300
+
+sleep, 1
+
+shoulder_lift, read, ID
+shoulder_lift, read, Present_Position
+shoulder_lift, write, Goal_Position, {Present_Position} - 600
+
+shoulder_pan, read, ID
+shoulder_pan, read, Present_Position
+shoulder_pan, write, Goal_Position, {Present_Position} + 800
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, {Present_Position} + 650
+
+
+elbow_flex, read, ID
+elbow_flex, read, Present_Position
+elbow_flex, write, Goal_Position, {Present_Position} + 650

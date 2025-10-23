@@ -52,7 +52,7 @@ class VoiceConfig:
     min_dbfs: float = -30.0             # energy gate to skip noise
 
     # Vosk ASR
-    vosk_model_path: str = "./vosk-model-small-cn-0.22"  # ← 修改为你的模型目录
+    vosk_model_path: str = "./vosk-model-cn-0.22"  # ← 修改为你的模型目录
     vosk_sample_rate: int = 16_000      # most CN models are 16k
     grammar: List[str] = field(default_factory=lambda: [
         "停止", "上升", "上升10厘米", "上升5厘米" , "降低", "前进", "后退", "向右", "向左", "右转", "左转",

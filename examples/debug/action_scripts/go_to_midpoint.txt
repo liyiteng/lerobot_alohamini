@@ -1,0 +1,25 @@
+
+shoulder_pan, read, ID
+shoulder_pan, read, Present_Position
+shoulder_pan, write, Goal_Position, 2048
+
+gripper, read, ID
+gripper, read, Present_Position
+gripper, write, Goal_Position, 2048
+
+wrist_roll, read, ID
+wrist_roll, read, Present_Position
+wrist_roll, write, Goal_Position, 2048
+
+
+wrist_flex, read, ID
+wrist_flex, read, Present_Position
+wrist_flex, write, Goal_Position, 2048
+
+elbow_flex, read, ID
+elbow_flex, read, Present_Position
+elbow_flex, write, Goal_Position, 2048
+
+shoulder_lift, read, ID
+shoulder_lift, read, Present_Position
+shoulder_lift, write, Goal_Position, 2048
