@@ -93,7 +93,9 @@ try:
 
         voice_action = execu.get_action_nowait()
         action = {**arm_actions, **base_action, **lift_action, **voice_action}
-        log_rerun_data(observation, action)
+        #log_rerun_data(observation, action)
+
+        
 
         if USE_DUMMY:
             print(f"[USE_DUMMY] action → {action}")

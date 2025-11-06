@@ -7,21 +7,35 @@ VoiceExecutor — text -> action
 - Relative lift delta -> absolute using update_height_mm().
 - Emergency stop.
 - Chinese/English number normalization.
+- NEW: Built-in replay launcher on trigger phrase ("锤他" / "chui ta" / "hammer him") with cooldown.
 """
 
 from __future__ import annotations
 import re
 import time
+import subprocess
+import sys
+import shlex
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
 # ---------- config ----------
 @dataclass
 class ExecConfig:
+    # Motion scales
     xy_speed_cmd: float = 0.20
     theta_speed_cmd: float = 500.0
     emit_text_cmd: bool = True
     z_epsilon_mm: float = 0.8  # sticky height considered reached within this tolerance
+
+    # --- NEW: replay execution knobs ---
+    enable_replay_execute: bool = True          # if True, VoiceExecutor launches replay internally
+    replay_cooldown_s: float = 2.0              # avoid multiple triggers within cooldown (seconds)
+    replay_default_dataset: str = "liyitenga/record_20251015131957"
+    replay_default_episode: int = 0
+    # command template; {python}, {dataset}, {episode} will be formatted
+    replay_cmd_template: str = "{python} -m lerobot.tools.replay --dataset {dataset} --episode {episode}"
+    replay_dry_run: bool = False                # if True, print command without executing (for debugging)
 
 # ---------- units and number parsing ----------
 _UNIT_MM = {
@@ -184,6 +198,11 @@ _ABS_Z_PAT = re.compile(
 _CANCEL_Z_PAT = re.compile(r"(?:取消高度|取消z|取消粘滞|清除高度|停止高度|cancel\s+(?:height|z)|clear\s+(?:height|z))", re.IGNORECASE)
 
 def parse_command(s: str) -> Dict[str, Any]:
+    """
+    Parse a free-form text command into an action dict.
+    NOTE: For replay trigger, we set a special key '__replay' which the executor can
+    choose to launch internally (preferred) or pass back to caller (legacy).
+    """
     s = (s or "").strip().lower()
     out: Dict[str, Any] = {}
     if any(k in s for k in ["停止","急停","stop","停"]): return {"__stop": True}
@@ -232,7 +251,7 @@ def parse_command(s: str) -> Dict[str, Any]:
         n = normalize_number(s) or 0.0; unit = next((u for u in _UNIT_MM if u in s), "毫米")
         out["lift_axis.height_mm"] = - (n * _UNIT_MM[unit])
 
-    # replay hook (let caller decide how to launch)
+    # replay hook (let executor decide how to launch)
     if ("锤他" in s) or ("chui ta" in s) or ("hammer him" in s):
         out["__replay"] = {"dataset": "liyitenga/record_20251015131957", "episode": 0}
     return out
@@ -247,11 +266,15 @@ class VoiceExecutor:
         self._hold_until: float = 0.0
         self._one_shot_action: Dict[str, float] = {}
         self._sticky_z_target_mm: Optional[float] = None
+        # NEW: last replay timestamp to enforce cooldown
+        self._last_replay_ts: float = 0.0
 
     def update_height_mm(self, h: float):
+        """Update current measured Z height (mm)."""
         self._now_height_mm = float(h)
 
     def get_action_nowait(self) -> Dict[str, float]:
+        """Return one frame of action; includes held base command and sticky Z pursuit."""
         now = time.time()
         act: Dict[str, float] = {}
         # held base command
@@ -272,12 +295,20 @@ class VoiceExecutor:
         return act
 
     def handle_text(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Consume a recognized text command and return an (optional) debug dict.
+        Side effects:
+        - may enqueue one-shot actions
+        - may start 'held' actions with a deadline
+        - may start sticky Z target pursuit
+        - NEW: may launch a replay process internally
+        """
         text = (text or "").strip()
         if not text:
             return None
         print(f"[ASR] {text}")
 
-        # 1) HOLD
+        # 1) HOLD pattern (time-based base motion)
         hold = _parse_hold(text)
         if hold is not None:
             kind = hold["kind"]; secs = float(hold["secs"])
@@ -289,20 +320,29 @@ class VoiceExecutor:
                 print(f"{cmd} for {secs:.1f}s")
             return {"__hold": secs, **cmd}
 
-        # 2) Instant / sticky Z / cancel
+        # 2) Generic parsing (including sticky Z, stop, and replay hook)
         parsed = parse_command(text)
 
-        # replay hook out
-        if "__replay" in parsed:
-            return parsed
 
-        # cancel sticky
+        if "__replay" in parsed:
+            params = parsed["__replay"] or {}
+            dataset = str(params.get("dataset", "liyitenga/record_20251015131957"))
+            episode = int(params.get("episode", 0))
+            import sys, subprocess, shlex
+            cmd = [sys.executable, "examples/alohamini/replay_bi.py",
+                "--dataset", dataset, "--episode", str(episode)]
+            print(f"[ASR] Trigger detected → Executing: {' '.join(shlex.quote(c) for c in cmd)}")
+            subprocess.Popen(cmd, cwd="/home/worker/lerobot_alohamini") 
+            
+
+
+        # 2b) Cancel sticky Z
         if parsed.get("__cancel_z"):
             self._sticky_z_target_mm = None
             print("✳️ sticky Z cleared")
             return {"__cancel_z": True}
 
-        # stop
+        # 2c) Emergency stop
         if parsed.get("__stop"):
             self._held_cmd.clear(); self._hold_until = 0.0
             base_cmd = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
@@ -312,20 +352,20 @@ class VoiceExecutor:
             self._one_shot_action = dict(base_cmd)
             return {"__stop": True}
 
-        # sticky absolute target
+        # 2d) Sticky absolute Z target
         if "__sticky_z_mm" in parsed:
             self._sticky_z_target_mm = float(parsed["__sticky_z_mm"])
             print(f"✳️ sticky Z target → {self._sticky_z_target_mm:.1f} mm (ε={self.cfg.z_epsilon_mm}mm)")
             return {"lift_axis.height_mm": self._sticky_z_target_mm}
 
-        # relative lift -> absolute (STICKY)
+        # 2e) Relative lift -> absolute sticky Z
         if "lift_axis.height_mm" in parsed:
             delta = float(parsed["lift_axis.height_mm"])
             self._sticky_z_target_mm = self._now_height_mm + delta
             print(f"✳️ sticky Z target (relative) → {self._sticky_z_target_mm:.1f} mm (ε={self.cfg.z_epsilon_mm}mm)")
             return {"lift_axis.height_mm": self._sticky_z_target_mm}
 
-        # fallback velocities
+        # 2f) Fallback velocities (if user said "turn left/right" without number)
         if "theta.vel" in parsed and parsed["theta.vel"] == 0.0:
             parsed["theta.vel"] = self.cfg.theta_speed_cmd * (
                 1.0 if ("turn left" in text.lower() or "左转" in text) else
@@ -342,6 +382,7 @@ class VoiceExecutor:
             elif any(k in text.lower() for k in ["右移","向右平移","move right","strafe right"]):
                 parsed["y.vel"] = -self.cfg.xy_speed_cmd
 
+        # 2g) Enqueue one-shot base / Z actions
         base_cmd = {k: float(parsed[k]) for k in ("x.vel","y.vel","theta.vel") if k in parsed}
         z_cmd = {"lift_axis.height_mm": float(parsed["lift_axis.height_mm"])} if "lift_axis.height_mm" in parsed else {}
         self._one_shot_action.clear(); self._one_shot_action.update(base_cmd); self._one_shot_action.update(z_cmd)
@@ -354,3 +395,5 @@ class VoiceExecutor:
             print({**printable_base, **printable_z})
 
         return {**base_cmd, **z_cmd}
+
+

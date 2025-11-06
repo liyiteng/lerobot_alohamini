@@ -57,6 +57,7 @@ while True:
     observation = robot.get_observation() if not USE_DUMMY else {}
 
     arm_actions = leader.get_action()
+    arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
     keyboard_keys = keyboard.get_action()
     base_action = robot._from_keyboard_to_base_action(keyboard_keys)
     lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)

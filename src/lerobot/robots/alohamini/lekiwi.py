@@ -63,13 +63,13 @@ class LeKiwi(Robot):
             port=self.config.left_port,
             motors={
                 # arm
-                "left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "left_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "left_elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_left_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "arm_left_elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
                 #"left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "left_wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "left_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_left_wrist_roll": Motor(5, "sts3215", norm_mode_body),
+                "arm_left_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
                 # base
                 "base_left_wheel": Motor(8, "sts3215", MotorNormMode.RANGE_M100_100),
                 "base_back_wheel": Motor(9, "sts3215", MotorNormMode.RANGE_M100_100),
@@ -83,24 +83,24 @@ class LeKiwi(Robot):
             port=self.config.right_port,
             motors={
                 # arm
-                "right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "arm_right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
                 #"right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                "arm_right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
+                "arm_right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
                 #"lift_axis": Motor(12, "sts3215", MotorNormMode.DEGREES),
             },
             calibration=self.calibration,
         )
 
 
-        self.left_arm_motors  = [m for m in self.left_bus.motors        if m.startswith("left_")]
+        self.left_arm_motors  = [m for m in self.left_bus.motors        if m.startswith("arm_left_")]
         self.base_motors      = [m for m in self.left_bus.motors        if m.startswith("base_")]
         #self.left_arm_motors  = [m for m in self.left_bus.motors        if m.startswith("right_arm_")]
 
-        self.right_arm_motors = [m for m in (self.right_bus.motors if self.right_bus else []) if m.startswith("right_")]
+        self.right_arm_motors = [m for m in (self.right_bus.motors if self.right_bus else []) if m.startswith("arm_right_")]
 
         # self.arm_motors = [motor for motor in self.left_bus.motors if motor.startswith("arm")]
         # self.base_motors = [motor for motor in self.left_bus.motors if motor.startswith("base")]
@@ -119,20 +119,20 @@ class LeKiwi(Robot):
     def _state_ft(self) -> dict[str, type]:
         return dict.fromkeys(
             (
-                "left_shoulder_pan.pos",
-                "left_shoulder_lift.pos",
-                "left_elbow_flex.pos",
-                "left_wrist_flex.pos",
+                "arm_left_shoulder_pan.pos",
+                "arm_left_shoulder_lift.pos",
+                "arm_left_elbow_flex.pos",
+                "arm_left_wrist_flex.pos",
                 #"left_wrist_yaw.pos",
-                "left_wrist_roll.pos",
-                "left_gripper.pos",
-                "right_shoulder_pan.pos",
-                "right_shoulder_lift.pos",
-                "right_elbow_flex.pos",
-                "right_wrist_flex.pos",
+                "arm_left_wrist_roll.pos",
+                "arm_left_gripper.pos",
+                "arm_right_shoulder_pan.pos",
+                "arm_right_shoulder_lift.pos",
+                "arm_right_elbow_flex.pos",
+                "arm_right_wrist_flex.pos",
                 #"right_wrist_yaw.pos",
-                "right_wrist_roll.pos",
-                "right_gripper.pos",
+                "arm_right_wrist_roll.pos",
+                "arm_right_gripper.pos",
                 "x.vel",
                 "y.vel",
                 "theta.vel",
@@ -541,8 +541,8 @@ class LeKiwi(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         # arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
-        left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("left_")}
-        right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("right_")}
+        left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_")}
+        right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_")}
 
 
         base_goal_vel = {k: v for k, v in action.items() if k.endswith(".vel")}
