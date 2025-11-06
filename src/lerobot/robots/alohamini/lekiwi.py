@@ -196,13 +196,13 @@ class LeKiwi(Robot):
 
     def calibrate(self) -> None:
         """
-        双臂标定（左臂+底盘在 self.left_bus，右臂在 self.right_bus）：
-        - 左臂：位置模式 → 半圈归零 → ROM 采集
-        - 底盘：不做 homing，ROM 固定 0~4095
-        - 右臂（若存在）：位置模式 → 半圈归零 → ROM 采集
-        - 合并成一份 self.calibration，分别按总线过滤后写回两条总线并保存
+        Dual-arm calibration (left arm + chassis on self.left_bus, right arm on self.right_bus):
+        - Left arm: position mode → half-turn homing → collect ROM
+        - Chassis: no homing; ROM fixed to 0–4095
+        - Right arm (if present): position mode → half-turn homing → collect ROM
+        - Merge into a single self.calibration, split by bus, write back to both buses, and save
         """
-        # ====== 若已有校准文件：直接写回，两条总线各自过滤 ======
+        # If a calibration file already exists: load it and write back, filtering for each bus separately
         if self.calibration:
             user_input = input(
                 f"Press ENTER to use provided calibration file associated with the id {self.id}, "
@@ -210,11 +210,11 @@ class LeKiwi(Robot):
             )
             if user_input.strip().lower() != "c":
                 logger.info("Writing existing calibration to both buses (trim per-bus caches)")
-                # 左总线
+
                 calib_left = {k: v for k, v in self.calibration.items() if k in self.left_bus.motors}
                 self.left_bus.write_calibration(calib_left, cache=False)
                 self.left_bus.calibration = calib_left
-                # 右总线（可选）
+
                 if getattr(self, "right_bus", None):
                     calib_right = {k: v for k, v in self.calibration.items() if k in self.right_bus.motors}
                     self.right_bus.write_calibration(calib_right, cache=False)
@@ -224,11 +224,9 @@ class LeKiwi(Robot):
 
         logger.info(f"\nRunning calibration of {self} (dual-bus if right_bus present)")
 
-        # ====== 左臂 + 底盘（self.left_bus）======
         if not getattr(self, "left_arm_motors", None):
             raise RuntimeError("left_arm_motors is empty; expected names starting with 'left_arm_'")
 
-        # 左臂切位置模式
         self.left_bus.disable_torque(self.left_arm_motors)
         for name in self.left_arm_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
@@ -236,7 +234,6 @@ class LeKiwi(Robot):
         input("Move LEFT arm to the middle of its range of motion, then press ENTER...")
         left_homing = self.left_bus.set_half_turn_homings(self.left_arm_motors)  # 仅左臂条目
 
-        # 底盘不做 homing，固定 0
         for wheel in self.base_motors:
             left_homing[wheel] = 0
 
@@ -250,7 +247,6 @@ class LeKiwi(Robot):
             l_mins[m] = 0
             l_maxs[m] = 4095
 
-        # ====== 右臂（self.right_bus，可选）======
         right_homing = {}
         r_mins, r_maxs = {}, {}
 
@@ -265,10 +261,9 @@ class LeKiwi(Robot):
             print("Move RIGHT arm joints sequentially through full ROM. Press ENTER to stop...")
             r_mins, r_maxs = self.right_bus.record_ranges_of_motion(self.right_arm_motors)
 
-        # ====== 合并 → 按总线过滤写回 → 保存一份文件 ======
+        # Merge → filter by bus and write back → save as a single file
         self.calibration = {}
 
-        # 左（含底盘）
         for name, motor in self.left_bus.motors.items():
             self.calibration[name] = MotorCalibration(
                 id=motor.id,
@@ -278,7 +273,6 @@ class LeKiwi(Robot):
                 range_max=l_maxs.get(name, 4095),
             )
 
-        # 右（若存在）
         if getattr(self, "right_bus", None):
             for name, motor in self.right_bus.motors.items():
                 self.calibration[name] = MotorCalibration(
@@ -289,7 +283,7 @@ class LeKiwi(Robot):
                     range_max=r_maxs.get(name, 4095),
                 )
 
-        # ——写回：每条总线只写自己的条目，避免 KeyError——
+        # Write back: each bus only writes its own entries to avoid KeyError
         calib_left = {k: v for k, v in self.calibration.items() if k in self.left_bus.motors}
         self.left_bus.write_calibration(calib_left, cache=False)
         self.left_bus.calibration = calib_left
@@ -531,7 +525,7 @@ class LeKiwi(Robot):
         return obs_dict
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Command lekiwi to move to a target joint configuration.
+        """Command AlohaMini to move to a target joint configuration.
 
         The relative action magnitude may be clipped depending on the configuration parameter
         `max_relative_target`. In this case, the action sent differs from original action.
@@ -602,25 +596,21 @@ class LeKiwi(Robot):
         logger.info("Base motors stopped")
 
     def read_and_check_currents(self, limit_ma, print_currents):
-        """读取左右总线电流值（mA），打印，并执行过流保护"""
-        # 左总线
+        """Read left/right bus currents (mA), print them, and enforce overcurrent protection"""
         scale = 6.5  # sts3215 电流单位转换系数
         left_curr_raw = {}
         left_curr_raw = self.left_bus.sync_read("Present_Current", list(self.left_bus.motors.keys()))
-        # 右总线（如果有）
         right_curr_raw = {}
         if getattr(self, "right_bus", None):
             right_curr_raw = self.right_bus.sync_read("Present_Current", list(self.right_bus.motors.keys()))
 
-        # 打印格式化输出
         if print_currents:
-            left_line = "{" + ",".join(str(round(v * scale, 1)) for v in left_curr_raw.values()) + "}"
+            left_line = "{" + ",".join(str(int(v * scale)) for v in left_curr_raw.values()) + "}"
             print(f"Left Bus currents: {left_line}")
             if right_curr_raw:
-                right_line = "{" + ",".join(str(round(v * scale, 1)) for v in right_curr_raw.values()) + "}"
+                right_line = "{" + ",".join(str(int(v * scale)) for v in right_curr_raw.values()) + "}"
                 print(f"Right Bus currents: {right_line}")
 
-        # 检查过流
         for name, raw in {**left_curr_raw, **right_curr_raw}.items():
             current_ma = float(raw) * scale
             if current_ma > limit_ma:
@@ -635,7 +625,6 @@ class LeKiwi(Robot):
                     print(f"[Overcurrent] disconnect error: {e}")
                 sys.exit(1)
 
-        # 返回电流（单位：mA）
         return {k: round(v * scale, 1) for k, v in {**left_curr_raw, **right_curr_raw}.items()}
 
     def disconnect(self):

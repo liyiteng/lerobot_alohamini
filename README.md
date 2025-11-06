@@ -1,52 +1,54 @@
+## Updates
+- **[2025-11-06]** Compatible with LeRobot 0.4
 
 
-## 前言
+## Introduction
 
-lerobot_alohamini相较于原版lerobot，显著增强了调试能力，并适配了AlohaMini轮式双臂机器人硬件（基于Lekiwi扩展）。
+Compared to the original lerobot, lerobot_alohamini significantly enhances debugging capabilities and is adapted for AlohaMini wheeled dual-arm robot hardware (based on Lekiwi extension).
 
-关于新增的调试命令，具体参看：
-[debug命令汇总](examples/debug/README.md)
+For newly added debugging commands, please refer to:
+[Debug Command Summary](examples/debug/README.md)
 
-AlohaMini硬件预览图   
+AlohaMini Hardware Preview
 ![alohamini concept](examples/alohamini/media/alohamini1a.png)  
 
 
-## 开始使用（Ubuntu系统）
+## Getting Started (Ubuntu System)
 
-*** 强烈建议按顺序进行 ***
+*** Highly recommended to follow the sequence ***
 
-### 1. 准备工作
+### 1. Preparation
 
-####　网络环境测试
+#### Network Environment Test
 ```
 curl https://www.google.com
 curl https://huggingface.co
 ```
-首先确保网络通畅
+First ensure network connectivity
 
-####　cuda环境测试
+#### CUDA Environment Test
 ```
 nvidia-smi
 ```
-在终端输入后，应当可以看到cuda版本号
+After entering in terminal, you should be able to see the CUDA version number
 
 
-### 2. 克隆lerobot_alohamini仓库
+### 2. Clone lerobot_alohamini Repository
 
 ```
 cd ~
 git clone https://github.com/liyitenga/lerobot_alohamini.git
 ```
 
-### 3. 串口授权
-默认权限无法访问串口，我们需要对端口进行授权，lerobot官方文档的案例是将串口权限修改为666，实践中发现每次重启电脑都要重新设置，非常麻烦，建议直接将当前用户添加到设备用户组，永久解决该问题。
-1. 终端键入`whoami`  //查看当前用户名
-2. 键入`sudo usermod -a -G dialout username` //永久添加username到设备用户组
-3. 重启电脑，以让权限生效
+### 3. Serial Port Authorization
+By default, serial ports cannot be accessed. We need to authorize the ports. The lerobot official documentation example modifies serial port permissions to 666, but in practice, this needs to be reset after each computer restart, which is very troublesome. It's recommended to directly add the current user to the device user group for a permanent solution.
+1. Enter `whoami` in terminal  // Check current username
+2. Enter `sudo usermod -a -G dialout username` // Permanently add username to device user group
+3. Restart computer to make permissions effective
 
-### 4. 安装conda3及环境依赖
+### 4. Install conda3 and Environment Dependencies
 
-安装conda3
+Install conda3
 ```
 mkdir -p ~/miniconda3
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
@@ -56,138 +58,138 @@ rm ~/miniconda3/miniconda.sh
 source ~/.bashrc
 ```
 
-初始化conda3
+Initialize conda3
 ```
 conda create -y -n lerobot_alohamini python=3.10
 conda activate lerobot_alohamini
 ```
 
-安装环境依赖
+Install environment dependencies
 ```
 cd ~/lerobot_alohamini
 pip install -e .[all]
 conda install ffmpeg=7.1.1 -c conda-forge
 ```
 
-### 5. 配置机械臂端口号
+### 5. Configure Robot Arm Port Numbers
 
 
-Alohamini一共有4条机械臂，2条主臂连接pc电脑，2条从臂连接树莓派，共4个端口。
+AlohaMini has 4 robot arms in total: 2 leader arms connected to the PC, 2 follower arms connected to Raspberry Pi, totaling 4 ports.
 
-由于每次重新插拔，都会使端口号改变，因此要熟练掌握查找端口号的操作，后期熟练后，可以使用硬连接进行端口固化。
+Since port numbers change every time you reconnect, you must master the operation of finding port numbers. After becoming proficient, you can use hard links for port fixation.
 
-如果您直接购买的AlohaMini整机，则整机自带的树莓派已固化了2条从臂的端口号，无需再次配置。
+If you purchased the complete AlohaMini machine, the Raspberry Pi that comes with it has already fixed the port numbers for the 2 follower arms, so no additional configuration is needed.
 
 
-将机械臂连接好电源，并通过USB与电脑相连，查找机械臂的端口号。
+Connect the robot arms to power and to the computer via USB, then find the robot arm port numbers.
 
-方法1：
-通过脚本查找端口：
+Method 1:
+Find ports through script:
 ```
 cd ~/lerobot_alohamini
 
 lerobot-find-port
 ```
 
-方法2：
-可以在终端直接输入命令，根据每次插入后显示的端口号的不同，来依次确认插入的端口号
+Method 2:
+You can directly enter commands in terminal and confirm the inserted port numbers by observing the different port numbers displayed after each insertion
 
 ```
 ls /dev/ttyACM*
 ```
 
-**查找到正确的端口后，请修改下列文件中对应的端口号
-从臂：lerobot/robots/alohamini/config_lekiwi.py
-主臂：examples/alohamini/teleoperate_bi.py**
+**After finding the correct ports, please modify the corresponding port numbers in the following files:
+Follower arms: lerobot/robots/alohamini/config_lekiwi.py
+Leader arms: examples/alohamini/teleoperate_bi.py**
 
-注：每次重新插拔机械臂或重启电脑后，都要执行该操作
+Note: This operation must be performed every time you reconnect the robot arms or restart the computer
 
-### 6. 配置摄像头端口号
+### 6. Configure Camera Port Numbers
 
-树莓派中已内置了摄像头端口，无需配置：
+Camera ports are already built into the Raspberry Pi and do not need configuration:
 lerobot/robots/alohamini/config_lekiwi.py
 
 
-注意：
-- 多个摄像头不能插在一个USBHub上，1个USBHub仅支持1个摄像头
+Note:
+- Multiple cameras cannot be plugged into one USB Hub; 1 USB Hub only supports 1 camera
 
 
-### 7. 摇操校准及测试
+### 7. Teleoperation Calibration and Testing
 
 
-#### 7.1设置机械臂中位
+#### 7.1 Set Robot Arm to Middle Position
 
-host端校准：
-我们ssh进入树莓派，安装好conda环境后，执行下列操作：
+Host-side calibration:
+SSH into the Raspberry Pi, install the conda environment, then perform the following operations:
 
 ```
 python -m lerobot.robots.alohamini.lekiwi_host
 ```
 
-如果是第一次执行，系统会提示我们进行机械臂校准，将机械臂摆放到如图姿态，按下回车，然后对每个关节左转90度，然后右转90度，然后回车
-![校准](examples/alohamini/media/mid_position_so100.png)  
+If executing for the first time, the system will prompt us to calibrate the robot arm. Position the robot arm as shown in the image, press Enter, then rotate each joint 90 degrees left, then 90 degrees right, then press Enter
+![Calibration](examples/alohamini/media/mid_position_so100.png)  
 
 
-client端校准：
-执行下面命令，将ip替换为host端树莓派的真实ip，然后重复上述步骤
+Client-side calibration:
+Execute the following command, replace the IP with the actual IP of the host Raspberry Pi, then repeat the above steps
 ```
 python examples/alohamini/teleoperate_bi.py \
 --remote_ip 192.168.50.43
 ```
 
-#### 7.2 摇操指令汇总
+#### 7.2 Teleoperation Command Summary
 
-树莓派端：
+Raspberry Pi side:
 
 ```
 python -m lerobot.robots.alohamini.lekiwi_host
 ```
 
-PC端：
+PC side:
 ```
-//正常摇操
+// Normal teleoperation
 python examples/alohamini/teleoperate_bi.py
 
-//摇操(不连host，用于调试)
+// Teleoperation (without host connection, for debugging)
 python examples/alohamini/teleoperate_bi.py --use_dummy
 
-//带语音功能的摇操
+// Teleoperation with voice functionality
 python examples/alohamini/teleoperate_bi_voice.py
 
-//带语音功能的摇操(不连host，用于调试)
+// Teleoperation with voice functionality (without host connection, for debugging)
 python examples/alohamini/teleoperate_bi_voice.py --use_dummy
 
 
-注意：语音功能需要安装依赖,并设置DASHSCOPE_API_KEY
+Note: Voice functionality requires installing dependencies and setting DASHSCOPE_API_KEY
 
-//安装语音依赖
+// Install voice dependencies
 conda install -c conda-forge python-sounddevice
 pip install dashscope
 
 
-//到阿里百炼官网，申请一句话识别API，执行下列命令，将API放入环境变量
+// Go to Alibaba Cloud Bailian website, apply for speech recognition API, execute the following command to add the API to environment variables
 
 export DASHSCOPE_API_KEY="sk-434f820ebaxxxxxxxxx"
 ```
 
-### 8. 录制数据集
+### 8. Record Dataset
 
-#### 1 注册huggingface，获取并配置key
+#### 1 Register on HuggingFace, Obtain and Configure Key
 
-1.进入HuggingFace网站（huggingface.co），申请{Key}，记得带读写权限
+1. Go to HuggingFace website (huggingface.co), apply for {Key}, remember to include read and write permissions
 
-2.将API token添加到Git凭据中
+2. Add API token to Git credentials
 
 ```
 git config --global credential.helper store
 
-huggingface-cli login --token {key}--add-to-git-credential
+huggingface-cli login --token {key} --add-to-git-credential
 
 ```
 
-#### 2 运行脚本
+#### 2 Run Script
 
-修改repo-id参数，然后执行：
+Modify the repo-id parameter, then execute:
 
 ```
 HF_USER=$(huggingface-cli whoami | head -n 1)
@@ -197,6 +199,7 @@ echo $HF_USER
 
 ```
 python examples/alohamini/record_bi.py \
+  --dataset $HF_USER/so100_bi_test \
   --num_episodes 1 \
   --fps 30 \
   --episode_time 45 \
@@ -206,7 +209,7 @@ python examples/alohamini/record_bi.py \
 
 ```
 
-### 9. 重放数据集
+### 9. Replay Dataset
 ```
 python examples/alohamini/replay_bi.py  \
 --dataset $HF_USER/so100_bi_test \
@@ -214,7 +217,7 @@ python examples/alohamini/replay_bi.py  \
 --remote_ip 127.0.0.1
 ```
 
-### 10. 数据集可视化
+### 10. Dataset Visualization
 ```
   lerobot-dataset-viz \
   --repo-id $HF_USER/so100_bi_test \
@@ -222,7 +225,7 @@ python examples/alohamini/replay_bi.py  \
 ```
 
 
-### 11. 重新播放数据集
+### 11. Replay Dataset Again
 ```
 python lerobot/scripts/control_robot.py \
   --robot.type=so100 \
@@ -232,8 +235,8 @@ python lerobot/scripts/control_robot.py \
   --control.episode=0
 ```
 
-### 12. 本地训练
-//act
+### 12. Local Training
+// ACT
 
 ```
 lerobot-train \
@@ -247,38 +250,38 @@ lerobot-train \
 ```
 
 
-### 13. 远程训练
-以AutoDL为例：
-申请一张4070显卡，容器镜像选择Python  3.8(ubuntu20.04) Cuda  11.8或以上，并用终端登录
+### 13. Remote Training
+Using AutoDL as an example:
+Apply for an RTX 4070 GPU, select Python 3.8 (Ubuntu 20.04) CUDA 11.8 or above as container image, and log in via terminal
 ```
-//进入远程终端，初始化conda
+// Enter remote terminal, initialize conda
 conda init
 
-//重启终端，创建环境
+// Restart terminal, create environment
 conda create -y -n lerobot python=3.10
 conda activate lerobot
 
-//学术加速
+// Academic acceleration
 source /etc/network_turbo
 
-//获取lerobot
+// Get lerobot
 git clone https://github.com/liyitenga/lerobot_alohamini.git
 
-//安装必要文件
+// Install necessary files
 cd ~/lerobot_alohamini
 pip install -e ".[feetech,aloha,pusht]"
 ```
 
-运行训练命令
+Run training command
 
-最后安装FileZilla，将训练好的文件取回
-````
+Finally install FileZilla to retrieve the trained files
+```
 sudo apt install filezilla -y
-````
+```
 
-### 14. 评估训练集
+### 14. Evaluate Training Set
 
-用filezilla将训练好的模型拷贝到本地，并运行如下命令即可：
+Use FileZilla to copy the trained model to local machine, then run the following command:
 
 ```
 python examples/alohamini/evaluate_bi.py \
@@ -292,4 +295,4 @@ python examples/alohamini/evaluate_bi.py \
   --robot_id my_alohamini \
   --hf_model_id ./outputs/train/act_your_dataset1/checkpoints/020000/pretrained_model
   
-````
+```

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# evaluate_bi.py - 参数化版本
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features

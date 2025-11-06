@@ -32,7 +32,7 @@ from .config_lekiwi import LeKiwiClientConfig
 from .lift_axis import LiftAxisConfig
 
 logging.basicConfig(
-    #level=logging.INFO,   # 👈 确保 INFO 级别能显示
+    #level=logging.INFO,  
     format="[%(filename)s:%(lineno)d] %(message)s"
 )
 
@@ -98,8 +98,8 @@ class LeKiwiClient(Robot):
                 "x.vel",
                 "y.vel",
                 "theta.vel",
-                "lift_axis.height_mm",   # ← 新增
-                #"lift_axis.vel",         # ← 新增（可选，做调试用）
+                "lift_axis.height_mm",   
+                #"lift_axis.vel",         
             ),
             float,
         )
@@ -133,7 +133,7 @@ class LeKiwiClient(Robot):
 
         if self._is_connected:
             raise DeviceAlreadyConnectedError(
-                "LeKiwi Daemon is already connected. Do not run `robot.connect()` twice."
+                "AlohaMini Daemon is already connected. Do not run `robot.connect()` twice."
             )
 
         zmq = self._zmq
@@ -152,7 +152,7 @@ class LeKiwiClient(Robot):
         poller.register(self.zmq_observation_socket, zmq.POLLIN)
         socks = dict(poller.poll(self.connect_timeout_s * 1000))
         if self.zmq_observation_socket not in socks or socks[self.zmq_observation_socket] != zmq.POLLIN:
-            raise DeviceNotConnectedError("Timeout waiting for LeKiwi Host to connect expired.")
+            raise DeviceNotConnectedError("Timeout waiting for AlohaMini Host to connect expired.")
 
         self._is_connected = True
 
@@ -282,7 +282,7 @@ class LeKiwiClient(Robot):
         and a camera frame. Receives over ZMQ, translate to body-frame vel
         """
         if not self._is_connected:
-            raise DeviceNotConnectedError("LeKiwiClient is not connected. You need to run `robot.connect()`.")
+            raise DeviceNotConnectedError("AlohaMiniClient is not connected. You need to run `robot.connect()`.")
 
         frames, obs_dict = self._get_data()
 
@@ -350,19 +350,25 @@ class LeKiwiClient(Robot):
         up_pressed = self.teleop_keys.get("lift_up", "u") in pressed_keys
         dn_pressed = self.teleop_keys.get("lift_down", "j") in pressed_keys
 
-        # 读取上一次 Host 回来的当前高度（mm）
+        # Read the last height (mm) reported by the Host
         h_now = float(self.last_remote_state.get("lift_axis.height_mm", 0.0))
         #print(f"h_now:{h_now}")
 
         if not (up_pressed or dn_pressed):
-        # 没按 u/j 就给上一次的，避免未空
+        # If neither 'u' nor 'j' is pressed, reuse the previous value to avoid empty input
+            #return {"lift_axis.height_mm": h_now}
             return {"lift_axis.height_mm": h_now}
 
-        # 每次按键步进
-        h_target = h_now + (LiftAxisConfig.step_mm if up_pressed and not dn_pressed else -LiftAxisConfig.step_mm)
+        # Increment on each key press
+        if up_pressed and not dn_pressed:
+            h_target = h_now + LiftAxisConfig.step_mm
+        elif dn_pressed and not up_pressed:
+            h_target = h_now - LiftAxisConfig.step_mm
+        else:
+            h_target = h_now
         #print(f"h_target:{h_target}")
 
-        # 直接发 “目标高度（mm）”
+        # Send "target height (mm)" directly
         return {"lift_axis.height_mm": h_target}
 
 
@@ -372,7 +378,7 @@ class LeKiwiClient(Robot):
         pass
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Command lekiwi to move to a target joint configuration. Translates to motor space + sends over ZMQ
+        """Command AlohaMini to move to a target joint configuration. Translates to motor space + sends over ZMQ
 
         Args:
             action (np.ndarray): array containing the goal positions for the motors.
@@ -402,7 +408,7 @@ class LeKiwiClient(Robot):
 
         if not self._is_connected:
             raise DeviceNotConnectedError(
-                "LeKiwi is not connected. You need to run `robot.connect()` before disconnecting."
+                "AlohaMini is not connected. You need to run `robot.connect()` before disconnecting."
             )
         self.zmq_observation_socket.close()
         self.zmq_cmd_socket.close()

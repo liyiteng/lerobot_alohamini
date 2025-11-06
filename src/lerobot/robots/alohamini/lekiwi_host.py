@@ -18,6 +18,7 @@ import base64
 import json
 import logging
 import time
+import sys
 
 import cv2
 import zmq
@@ -45,32 +46,7 @@ class LeKiwiHost:
         self.zmq_observation_socket.close()
         self.zmq_cmd_socket.close()
         self.zmq_context.term()
-
-    def _check_overcurrent_and_maybe_shutdown(self, left_curr_raw: dict, right_curr_raw: dict):
-        """将原始电流换算为 mA，并在超过阈值时执行安全断开。
-        注意：只做保护检查，不写 observation。
-        """
-        if not self.enable_overcurrent_protect:
-            return  # 开关关闭则不做任何事
-
-        for name, raw in {**left_curr_raw, **right_curr_raw}.items():
-            try:
-                current_ma = float(raw) * self.current_scale
-            except Exception:
-                current_ma = 0.0
-
-            if current_ma > self.current_limit_ma:
-                print(f"[Overcurrent] {name}: {current_ma:.1f} mA > {self.current_limit_ma:.1f} mA -> disconnecting!")
-                try:
-                    # 你已有的安全停机逻辑，按需选择 stop_base / disconnect
-                    self.stop_base()     # 先停底盘（如果有）
-                except Exception:
-                    pass
-                try:
-                    self.disconnect()    # 断开总线
-                except Exception as e:
-                    print(f"[Overcurrent] disconnect error: {e}")
-                sys.exit(1)    
+ 
 
 def main():
     logging.info("Configuring LeKiwi")
@@ -79,7 +55,7 @@ def main():
     robot = LeKiwi(robot_config)
 
 
-    logging.info("Connecting LeKiwi")
+    logging.info("Connecting AlohaMini")
     robot.connect()
 
     logging.info("Starting HostAgent")
@@ -149,11 +125,11 @@ def main():
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Exiting...")
     finally:
-        print("Shutting down Lekiwi Host.")
+        print("Shutting down AlohaMini Host.")
         robot.disconnect()
         host.disconnect()
 
-    logging.info("Finished LeKiwi cleanly")
+    logging.info("Finished AlohaMini cleanly")
 
 
 if __name__ == "__main__":
