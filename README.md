@@ -37,7 +37,7 @@ After entering in terminal, you should be able to see the CUDA version number
 
 ```
 cd ~
-git clone https://github.com/liyitenga/lerobot_alohamini.git
+git clone https://github.com/liyiteng/lerobot_alohamini.git
 ```
 
 ### 3. Serial Port Authorization
