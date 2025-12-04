@@ -150,15 +150,9 @@ PC side:
 // Normal teleoperation
 python examples/alohamini/teleoperate_bi.py
 
-// Teleoperation (without host connection, for debugging)
-python examples/alohamini/teleoperate_bi.py --use_dummy
 
 // Teleoperation with voice functionality
 python examples/alohamini/teleoperate_bi_voice.py
-
-// Teleoperation with voice functionality (without host connection, for debugging)
-python examples/alohamini/teleoperate_bi_voice.py --use_dummy
-
 
 Note: Voice functionality requires installing dependencies and setting DASHSCOPE_API_KEY
 
