@@ -1,4 +1,5 @@
 ## Updates
+- **[2025-12-11]** Compatible with LeRobot 0.4.3
 - **[2025-11-06]** Compatible with LeRobot 0.4
 
 
@@ -224,18 +225,7 @@ python examples/alohamini/replay_bi.py  \
   --episode-index 0
 ```
 
-
-### 11. Replay Dataset Again
-```
-python lerobot/scripts/control_robot.py \
-  --robot.type=so100 \
-  --control.type=replay \
-  --control.fps=30 \
-  --control.repo_id=$HF_USER/so100_bi_test\
-  --control.episode=0
-```
-
-### 12. Local Training
+### 11. Local Training
 // ACT
 
 ```
@@ -250,7 +240,7 @@ lerobot-train \
 ```
 
 
-### 13. Remote Training
+### 12. Remote Training
 Using AutoDL as an example:
 Apply for an RTX 4070 GPU, select Python 3.8 (Ubuntu 20.04) CUDA 11.8 or above as container image, and log in via terminal
 ```
@@ -265,11 +255,11 @@ conda activate lerobot
 source /etc/network_turbo
 
 // Get lerobot
-git clone https://github.com/liyitenga/lerobot_alohamini.git
+git clone https://github.com/liyiteng/lerobot_alohamini.git
 
 // Install necessary files
 cd ~/lerobot_alohamini
-pip install -e ".[feetech,aloha,pusht]"
+pip install -e ".[feetech]"
 ```
 
 Run training command
@@ -279,7 +269,7 @@ Finally install FileZilla to retrieve the trained files
 sudo apt install filezilla -y
 ```
 
-### 14. Evaluate Training Set
+### 13. Evaluate Training Set
 
 Use FileZilla to copy the trained model to local machine, then run the following command:
 
