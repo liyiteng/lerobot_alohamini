@@ -91,10 +91,10 @@ class LeKiwiClientConfig(RobotConfig):
             # Movement
             "forward": "w",
             "backward": "s",
-            "left": "a",
-            "right": "d",
-            "rotate_left": "z",
-            "rotate_right": "x",
+            "left": "z",
+            "right": "x",
+            "rotate_left": "a",
+            "rotate_right": "d",
             # Speed control
             "speed_up": "r",
             "speed_down": "f",

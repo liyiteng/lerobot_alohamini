@@ -7,7 +7,7 @@ import time
 from lerobot.robots.alohamini import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.bi_so100_leader import BiSO100Leader, BiSO100LeaderConfig
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 # NEW:
@@ -102,7 +102,7 @@ try:
         else:
             robot.send_action(action)
 
-        busy_wait(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+        precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
 finally:
     try:
         speech.stop()

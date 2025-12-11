@@ -148,11 +148,16 @@ python -m lerobot.robots.alohamini.lekiwi_host
 PC side:
 ```
 // Normal teleoperation
-python examples/alohamini/teleoperate_bi.py
+
+python examples/alohamini/teleoperate_bi.py \
+--remote_ip 192.168.50.43 \
+--leader_id so101_leader_bi
 
 
 // Teleoperation with voice functionality
-python examples/alohamini/teleoperate_bi_voice.py
+python examples/alohamini/teleoperate_bi_voice.py \
+--remote_ip 192.168.50.43 \
+--leader_id so101_leader_bi
 
 Note: Voice functionality requires installing dependencies and setting DASHSCOPE_API_KEY
 
@@ -199,7 +204,8 @@ python examples/alohamini/record_bi.py \
   --episode_time 45 \
   --reset_time 8 \
   --task_description "pickup1" \
-  --remote_ip 127.0.0.1
+  --remote_ip 127.0.0.1 \
+  --leader_id so101_leader_bi
 
 ```
 

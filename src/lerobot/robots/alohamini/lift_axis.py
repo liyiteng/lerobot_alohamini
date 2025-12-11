@@ -28,13 +28,13 @@ class LiftAxisConfig:
     soft_max_mm: float = 600        # Lift travel range
 
     # Homing (drive downward to hard stop → rebound slightly)
-    home_down_speed: int = 1000      # Downward target velocity in velocity mode
-    home_stall_current_ma: int = 60  # Stall current threshold; used when no current feedback
+    home_down_speed: int = 1300      # Downward target velocity in velocity mode
+    home_stall_current_ma: int = 150  # Stall current threshold; used when no current feedback
     home_backoff_deg: float = 5.0
 
     # Velocity closed-loop gains
     kp_vel: float = 300              # (target speed units / mm)
-    v_max: int = 1000                # Velocity limit (depends on motor)
+    v_max: int = 1300                # Velocity limit (depends on motor)
     on_target_mm: int = 1.0          # Position tolerance (mm)
     
     dir_sign: int = -1               # +1 no inversion; -1 invert direction

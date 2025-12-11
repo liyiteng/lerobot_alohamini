@@ -4,7 +4,7 @@ import argparse
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.alohamini.config_lekiwi import LeKiwiClientConfig
 from lerobot.robots.alohamini.lekiwi_client import LeKiwiClient
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 parser = argparse.ArgumentParser(description="Replay a LeRobot dataset episode")
@@ -46,6 +46,6 @@ for idx in range(dataset.num_frames):
     print(f"replay_bi.action:{action}")
     robot.send_action(action)
 
-    busy_wait(max(1.0 / dataset.fps - (time.perf_counter() - t0), 0.0))
+    precise_sleep(max(1.0 / dataset.fps - (time.perf_counter() - t0), 0.0))
 
 robot.disconnect()

@@ -6,7 +6,7 @@ import time
 from lerobot.robots.alohamini import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.bi_so100_leader import BiSO100Leader, BiSO100LeaderConfig
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 # ============ Parameter Section ============ #
@@ -15,6 +15,7 @@ parser.add_argument("--no_robot", action="store_true", help="Do not connect robo
 parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
 parser.add_argument("--fps", type=int, default=30, help="Main loop frequency (frames per second)")
 parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
+parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
 
 args = parser.parse_args()
 
@@ -33,7 +34,7 @@ robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id="my_alohamini")
 bi_cfg = BiSO100LeaderConfig(
     left_arm_port="/dev/am_arm_leader_left",
     right_arm_port="/dev/am_arm_leader_right",
-    id="so101_leader_bi3",
+    id=args.leader_id,
 )
 leader = BiSO100Leader(bi_cfg)
 keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
@@ -80,4 +81,4 @@ while True:
         robot.send_action(action)
         print(f"Sent action → {action}")
 
-    busy_wait(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+    precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))

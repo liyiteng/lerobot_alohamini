@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--task_description", type=str, default="My task description4", help="Task description")
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="Robot host IP")
     parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
+    parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
+
     args = parser.parse_args()
 
     # === Robot and teleop config ===
@@ -35,7 +37,7 @@ def main():
     leader_arm_config = BiSO100LeaderConfig(
         left_arm_port="/dev/am_arm_leader_left",
         right_arm_port="/dev/am_arm_leader_right",
-        id="so101_leader_bi3",
+        id=args.leader_id,
     )
     keyboard_config = KeyboardTeleopConfig()
 
