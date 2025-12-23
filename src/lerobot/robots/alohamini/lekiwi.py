@@ -67,7 +67,7 @@ class LeKiwi(Robot):
                 "arm_left_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
                 "arm_left_elbow_flex": Motor(3, "sts3215", norm_mode_body),
                 "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                #"left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                #"arm_left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
                 "arm_left_wrist_roll": Motor(5, "sts3215", norm_mode_body),
                 "arm_left_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
                 # base
@@ -87,7 +87,7 @@ class LeKiwi(Robot):
                 "arm_right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
                 "arm_right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
                 "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                #"right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                #"arm_right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
                 "arm_right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
                 "arm_right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
                 #"lift_axis": Motor(12, "sts3215", MotorNormMode.DEGREES),
@@ -113,6 +113,9 @@ class LeKiwi(Robot):
         bus_left=self.left_bus,
         bus_right=self.right_bus,
 )
+        # Overcurrent debounce: require N consecutive over-limit reads
+        self._overcurrent_count: dict[str, int] = {}
+        self._overcurrent_trip_n = 20
 
 
     @property
@@ -597,7 +600,7 @@ class LeKiwi(Robot):
 
     def read_and_check_currents(self, limit_ma, print_currents):
         """Read left/right bus currents (mA), print them, and enforce overcurrent protection"""
-        scale = 6.5  # sts3215 电流单位转换系数
+        scale = 6.5  # sts3215 current unit conversion factor
         left_curr_raw = {}
         left_curr_raw = self.left_bus.sync_read("Present_Current", list(self.left_bus.motors.keys()))
         right_curr_raw = {}
@@ -606,24 +609,42 @@ class LeKiwi(Robot):
 
         if print_currents:
             left_line = "{" + ",".join(str(int(v * scale)) for v in left_curr_raw.values()) + "}"
-            print(f"Left Bus currents: {left_line}")
+            #print(f"Left Bus currents(ma): {left_line}")
             if right_curr_raw:
                 right_line = "{" + ",".join(str(int(v * scale)) for v in right_curr_raw.values()) + "}"
-                print(f"Right Bus currents: {right_line}")
+                #print(f"Right Bus currents(ma): {right_line}")
 
+        tripped = None
         for name, raw in {**left_curr_raw, **right_curr_raw}.items():
             current_ma = float(raw) * scale
+
             if current_ma > limit_ma:
-                print(f"[Overcurrent] {name}: {current_ma:.1f} mA > {limit_ma:.1f} mA, disconnecting!")
-                try:
-                    self.stop_base()
-                except Exception:
-                    pass
-                try:
-                    self.disconnect()
-                except Exception as e:
-                    print(f"[Overcurrent] disconnect error: {e}")
-                sys.exit(1)
+                self._overcurrent_count[name] = self._overcurrent_count.get(name, 0) + 1
+                print(f"[Overcurrent] {name}: {current_ma:.1f} mA > {limit_ma:.1f} mA ")
+            else:
+                # reset when it goes back to normal -> "consecutive" semantics
+                self._overcurrent_count[name] = 0
+
+            if self._overcurrent_count[name] >= self._overcurrent_trip_n:
+                tripped = (name, current_ma, self._overcurrent_count[name])
+                break
+
+        if tripped is not None:
+            name, current_ma, n = tripped
+            print(
+                f"[Overcurrent] {name}: {current_ma:.1f} mA > {limit_ma:.1f} mA "
+                f"for {n} consecutive reads, disconnecting!"
+            )
+            try:
+                self.stop_base()
+            except Exception:
+                pass
+            try:
+                self.disconnect()
+            except Exception as e:
+                print(f"[Overcurrent] disconnect error: {e}")
+            sys.exit(1)
+
 
         return {k: round(v * scale, 1) for k, v in {**left_curr_raw, **right_curr_raw}.items()}
 
