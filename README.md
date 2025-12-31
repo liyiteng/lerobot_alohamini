@@ -200,6 +200,7 @@ echo $HF_USER
 
 ```
 
+//Create New Dataset
 ```
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
@@ -210,6 +211,21 @@ python examples/alohamini/record_bi.py \
   --task_description "pickup1" \
   --remote_ip 127.0.0.1 \
   --leader_id so101_leader_bi
+
+```
+
+//Resume Dataset
+```
+python examples/alohamini/record_bi.py \
+  --dataset $HF_USER/so100_bi_test \
+  --num_episodes 1 \
+  --fps 30 \
+  --episode_time 45 \
+  --reset_time 8 \
+  --task_description "pickup1" \
+  --remote_ip 127.0.0.1 \
+  --leader_id so101_leader_bi \
+  --resume 
 
 ```
 

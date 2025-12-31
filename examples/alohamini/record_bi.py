@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from email import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features
 from lerobot.processor import make_default_processors
@@ -15,7 +16,7 @@ from lerobot.utils.visualization_utils import init_rerun
 
 from datetime import datetime
 import argparse
-
+from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="Robot host IP")
     parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
     parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
+    parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
 
     args = parser.parse_args()
 
@@ -52,15 +54,24 @@ def main():
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR)
     dataset_features = {**action_features, **obs_features}
 
-    dataset = LeRobotDataset.create(
-        repo_id=args.dataset,
-        fps=args.fps,
-        features=dataset_features,
-        robot_type=robot.name,
-        use_videos=True,
-        image_writer_threads=4,
-    )
-    print(f"Dataset created with id: {dataset.repo_id}")
+    dataset_root = Path(args.dataset.split("/")[-1])
+
+    if args.resume:
+        print("Resuming existing dataset:", args.dataset)
+        dataset = LeRobotDataset(
+            args.dataset,
+        )
+        dataset.start_image_writer(num_threads=4)
+    else:
+        dataset = LeRobotDataset.create(
+            repo_id=args.dataset,
+            fps=args.fps,
+            features=dataset_features,
+            robot_type=robot.name,
+            use_videos=True,
+            image_writer_threads=4,
+        )
+        print(f"Dataset created with id: {dataset.repo_id}")
 
     # === Connect devices ===
     robot.connect()
