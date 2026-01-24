@@ -26,7 +26,8 @@ import sys
 import numpy as np
 
 from lerobot.cameras.utils import make_cameras_from_configs
-from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from lerobot.processor import RobotAction, RobotObservation
+from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import (
     FeetechMotorsBus,
@@ -169,11 +170,8 @@ class LeKiwi(Robot):
         return self.left_bus.is_connected and (self.right_bus.is_connected if self.right_bus else True) and cams_ok
 
 
-
+    @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        if self.is_connected:
-            raise DeviceAlreadyConnectedError(f"{self} already connected")
-
         self.left_bus.connect()
         self.right_bus.connect()
         if not self.is_calibrated and calibrate:
@@ -482,10 +480,8 @@ class LeKiwi(Robot):
         except Exception:
             return 0.0
         
-    def get_observation(self) -> dict[str, Any]:
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
+    @check_if_not_connected
+    def get_observation(self) -> RobotObservation:
         # Read actuators position for arm and vel for base
         start = time.perf_counter()
         # arm_pos = self.left_bus.sync_read("Present_Position", self.arm_motors)
@@ -527,7 +523,8 @@ class LeKiwi(Robot):
 
         return obs_dict
 
-    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+    @check_if_not_connected
+    def send_action(self, action: RobotAction) -> RobotAction:
         """Command AlohaMini to move to a target joint configuration.
 
         The relative action magnitude may be clipped depending on the configuration parameter
@@ -540,9 +537,6 @@ class LeKiwi(Robot):
         Returns:
             np.ndarray: the action sent to the motors, potentially clipped.
         """
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
         # arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
         left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_")}
         right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_")}
@@ -648,10 +642,8 @@ class LeKiwi(Robot):
 
         return {k: round(v * scale, 1) for k, v in {**left_curr_raw, **right_curr_raw}.items()}
 
+    @check_if_not_connected
     def disconnect(self):
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
         self.stop_base()
         self.left_bus.disconnect(self.config.disable_torque_on_disconnect)
         self.right_bus.disconnect(self.config.disable_torque_on_disconnect)
@@ -659,4 +651,3 @@ class LeKiwi(Robot):
             cam.disconnect()
 
         logger.info(f"{self} disconnected.")
-

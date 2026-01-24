@@ -5,7 +5,8 @@ import time
 
 from lerobot.robots.alohamini import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
-from lerobot.teleoperators.bi_so100_leader import BiSO100Leader, BiSO100LeaderConfig
+from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
+from lerobot.teleoperators.so_leader import SOLeaderConfig
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
@@ -31,12 +32,12 @@ if NO_LEADER:
     print("🧪 NO_LEADER mode enabled: leader arm will not connect, only print actions.")
 # Create configs
 robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id="my_alohamini")
-bi_cfg = BiSO100LeaderConfig(
-    left_arm_port="/dev/am_arm_leader_left",
-    right_arm_port="/dev/am_arm_leader_right",
+bi_cfg = BiSOLeaderConfig(
+    left_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_left"),
+    right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right"),
     id=args.leader_id,
 )
-leader = BiSO100Leader(bi_cfg)
+leader = BiSOLeader(bi_cfg)
 keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 keyboard = KeyboardTeleop(keyboard_config)
 robot = LeKiwiClient(robot_config)

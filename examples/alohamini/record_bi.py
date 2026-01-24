@@ -8,7 +8,8 @@ from lerobot.robots.alohamini.config_lekiwi import LeKiwiClientConfig
 from lerobot.robots.alohamini.lekiwi_client import LeKiwiClient
 from lerobot.scripts.lerobot_record import record_loop
 from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
-from lerobot.teleoperators.bi_so100_leader import BiSO100Leader, BiSO100LeaderConfig
+from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
+from lerobot.teleoperators.so_leader import SOLeaderConfig
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import init_keyboard_listener
 from lerobot.utils.utils import log_say
@@ -36,15 +37,15 @@ def main():
 
     # === Robot and teleop config ===
     robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
-    leader_arm_config = BiSO100LeaderConfig(
-        left_arm_port="/dev/am_arm_leader_left",
-        right_arm_port="/dev/am_arm_leader_right",
+    leader_arm_config = BiSOLeaderConfig(
+        left_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_left"),
+        right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right"),
         id=args.leader_id,
     )
     keyboard_config = KeyboardTeleopConfig()
 
     robot = LeKiwiClient(robot_config)
-    leader_arm = BiSO100Leader(leader_arm_config)
+    leader_arm = BiSOLeader(leader_arm_config)
     keyboard = KeyboardTeleop(keyboard_config)
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()

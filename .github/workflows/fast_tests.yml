@@ -45,7 +45,6 @@ permissions:
 env:
   UV_VERSION: "0.8.0"
   PYTHON_VERSION: "3.10"
-  DOCKER_IMAGE_NAME: huggingface/lerobot-gpu
 
 # Ensures that only the latest commit for a PR or branch is built, canceling older runs.
 concurrency:
@@ -63,7 +62,7 @@ jobs:
       HF_HOME: /mnt/cache/.cache/huggingface
       HF_LEROBOT_HOME: /mnt/cache/.cache/huggingface/lerobot
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           lfs: true

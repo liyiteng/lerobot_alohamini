@@ -18,7 +18,8 @@
 Edit LeRobot datasets using various transformation tools.
 
 This script allows you to delete episodes, split datasets, merge datasets,
-and remove features. When new_repo_id is specified, creates a new dataset.
+remove features, and convert image datasets to video format.
+When new_repo_id is specified, creates a new dataset.
 
 Usage Examples:
 
@@ -65,6 +66,25 @@ Remove camera feature:
         --operation.type remove_feature \
         --operation.feature_names "['observation.images.top']"
 
+Convert image dataset to video format and save locally:
+    python -m lerobot.scripts.lerobot_edit_dataset \
+        --repo_id lerobot/pusht_image \
+        --operation.type convert_image_to_video \
+        --operation.output_dir /path/to/output/pusht_video
+
+Convert image dataset to video format and save with new repo_id:
+    python -m lerobot.scripts.lerobot_edit_dataset \
+        --repo_id lerobot/pusht_image \
+        --new_repo_id lerobot/pusht_video \
+        --operation.type convert_image_to_video
+
+Convert image dataset to video format and push to hub:
+    python -m lerobot.scripts.lerobot_edit_dataset \
+        --repo_id lerobot/pusht_image \
+        --new_repo_id lerobot/pusht_video \
+        --operation.type convert_image_to_video \
+        --push_to_hub true
+
 Using JSON config file:
     python -m lerobot.scripts.lerobot_edit_dataset \
         --config_path path/to/edit_config.json
@@ -77,6 +97,7 @@ from pathlib import Path
 
 from lerobot.configs import parser
 from lerobot.datasets.dataset_tools import (
+    convert_image_to_video_dataset,
     delete_episodes,
     merge_datasets,
     remove_feature,
@@ -112,9 +133,26 @@ class RemoveFeatureConfig:
 
 
 @dataclass
+class ConvertImageToVideoConfig:
+    type: str = "convert_image_to_video"
+    output_dir: str | None = None
+    vcodec: str = "libsvtav1"
+    pix_fmt: str = "yuv420p"
+    g: int = 2
+    crf: int = 30
+    fast_decode: int = 0
+    episode_indices: list[int] | None = None
+    num_workers: int = 4
+    max_episodes_per_batch: int | None = None
+    max_frames_per_batch: int | None = None
+
+
+@dataclass
 class EditDatasetConfig:
     repo_id: str
-    operation: DeleteEpisodesConfig | SplitConfig | MergeConfig | RemoveFeatureConfig
+    operation: (
+        DeleteEpisodesConfig | SplitConfig | MergeConfig | RemoveFeatureConfig | ConvertImageToVideoConfig
+    )
     root: str | None = None
     new_repo_id: str | None = None
     push_to_hub: bool = False
@@ -258,6 +296,69 @@ def handle_remove_feature(cfg: EditDatasetConfig) -> None:
         LeRobotDataset(output_repo_id, root=output_dir).push_to_hub()
 
 
+def handle_convert_image_to_video(cfg: EditDatasetConfig) -> None:
+    # Note: Parser may create any config type with the right fields, so we access fields directly
+    # instead of checking isinstance()
+    dataset = LeRobotDataset(cfg.repo_id, root=cfg.root)
+
+    # Determine output directory and repo_id
+    # Priority: 1) new_repo_id, 2) operation.output_dir, 3) auto-generated name
+    output_dir_config = getattr(cfg.operation, "output_dir", None)
+
+    if cfg.new_repo_id:
+        # Use new_repo_id for both local storage and hub push
+        output_repo_id = cfg.new_repo_id
+        # Place new dataset as a sibling to the original dataset
+        # Get the parent of the actual dataset root (not cfg.root which might be the lerobot cache dir)
+        # Extract just the dataset name (after last slash) for the local directory
+        local_dir_name = cfg.new_repo_id.split("/")[-1]
+        output_dir = dataset.root.parent / local_dir_name
+        logging.info(f"Saving to new dataset: {cfg.new_repo_id} at {output_dir}")
+    elif output_dir_config:
+        # Use custom output directory for local-only storage
+        output_dir = Path(output_dir_config)
+        # Extract repo name from output_dir for the dataset
+        output_repo_id = output_dir.name
+        logging.info(f"Saving to local directory: {output_dir}")
+    else:
+        # Auto-generate name: append "_video" to original repo_id
+        output_repo_id = f"{cfg.repo_id}_video"
+        # Place new dataset as a sibling to the original dataset
+        # Extract just the dataset name (after last slash) for the local directory
+        local_dir_name = output_repo_id.split("/")[-1]
+        output_dir = dataset.root.parent / local_dir_name
+        logging.info(f"Saving to auto-generated location: {output_dir}")
+
+    logging.info(f"Converting dataset {cfg.repo_id} to video format")
+
+    new_dataset = convert_image_to_video_dataset(
+        dataset=dataset,
+        output_dir=output_dir,
+        repo_id=output_repo_id,
+        vcodec=getattr(cfg.operation, "vcodec", "libsvtav1"),
+        pix_fmt=getattr(cfg.operation, "pix_fmt", "yuv420p"),
+        g=getattr(cfg.operation, "g", 2),
+        crf=getattr(cfg.operation, "crf", 30),
+        fast_decode=getattr(cfg.operation, "fast_decode", 0),
+        episode_indices=getattr(cfg.operation, "episode_indices", None),
+        num_workers=getattr(cfg.operation, "num_workers", 4),
+        max_episodes_per_batch=getattr(cfg.operation, "max_episodes_per_batch", None),
+        max_frames_per_batch=getattr(cfg.operation, "max_frames_per_batch", None),
+    )
+
+    logging.info("Video dataset created successfully!")
+    logging.info(f"Location: {output_dir}")
+    logging.info(f"Episodes: {new_dataset.meta.total_episodes}")
+    logging.info(f"Frames: {new_dataset.meta.total_frames}")
+
+    if cfg.push_to_hub:
+        logging.info(f"Pushing to hub as {output_repo_id}...")
+        new_dataset.push_to_hub()
+        logging.info("✓ Successfully pushed to hub!")
+    else:
+        logging.info("Dataset saved locally (not pushed to hub)")
+
+
 @parser.wrap()
 def edit_dataset(cfg: EditDatasetConfig) -> None:
     operation_type = cfg.operation.type
@@ -270,10 +371,12 @@ def edit_dataset(cfg: EditDatasetConfig) -> None:
         handle_merge(cfg)
     elif operation_type == "remove_feature":
         handle_remove_feature(cfg)
+    elif operation_type == "convert_image_to_video":
+        handle_convert_image_to_video(cfg)
     else:
         raise ValueError(
             f"Unknown operation type: {operation_type}\n"
-            f"Available operations: delete_episodes, split, merge, remove_feature"
+            f"Available operations: delete_episodes, split, merge, remove_feature, convert_to_video"
         )
 
 
