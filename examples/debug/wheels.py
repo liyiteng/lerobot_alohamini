@@ -222,7 +222,24 @@ class OmniTeleop:
                 for name, val in zip(names, raw_vals):
                     self.bus.write("Goal_Velocity", name, val, normalize=False)
 
-                # print(f"Body: x={x:.2f}, y={y:.2f}, th={th:.1f} | Raw={raw_vals}")
+                try:
+                    currents_raw = {
+                        name: self.bus.read("Present_Current", name, normalize=False) for name in names
+                    }
+                    currents_ma = {name: currents_raw[name] * 6.5 for name in names}
+                    ids = {name: self.motors[name].id for name in names}
+                    print(
+                        "Current(mA) left(id={left_id})={left_wheel:.1f} "
+                        "back(id={back_id})={back_wheel:.1f} right(id={right_id})={right_wheel:.1f}".format(
+                            left_id=ids["left_wheel"],
+                            back_id=ids["back_wheel"],
+                            right_id=ids["right_wheel"],
+                            **currents_ma,
+                        )
+                    )
+                except Exception as exc:
+                    print(f"Current read failed: {exc}")
+
                 time.sleep(0.05)
         except KeyboardInterrupt:
             pass
