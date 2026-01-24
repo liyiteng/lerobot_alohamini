@@ -68,6 +68,7 @@ class LeKiwiClient(Robot):
         self.last_frames = {}
 
         self.last_remote_state = {}
+        self._lift_target_mm = None
 
         # Define three speed levels and a current index
         self.speed_levels = [
@@ -349,24 +350,18 @@ class LeKiwiClient(Robot):
 
         # Read the last height (mm) reported by the Host
         h_now = float(self.last_remote_state.get("lift_axis.height_mm", 0.0))
-        #print(f"h_now:{h_now}")
 
         if not (up_pressed or dn_pressed):
-        # If neither 'u' nor 'j' is pressed, reuse the previous value to avoid empty input
-            #return {"lift_axis.height_mm": h_now}
             return {"lift_axis.height_mm": h_now}
 
-        # Increment on each key press
         if up_pressed and not dn_pressed:
-            h_target = h_now + LiftAxisConfig.step_mm
+            target = LiftAxisConfig.soft_max_mm
         elif dn_pressed and not up_pressed:
-            h_target = h_now - LiftAxisConfig.step_mm
+            target = LiftAxisConfig.soft_min_mm
         else:
-            h_target = h_now
-        #print(f"h_target:{h_target}")
+            target = h_now
 
-        # Send "target height (mm)" directly
-        return {"lift_axis.height_mm": h_target}
+        return {"lift_axis.height_mm": target}
 
 
 

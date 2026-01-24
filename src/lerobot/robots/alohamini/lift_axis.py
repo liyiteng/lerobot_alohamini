@@ -38,7 +38,7 @@ class LiftAxisConfig:
     on_target_mm: int = 1.0          # Position tolerance (mm)
     
     dir_sign: int = -1               # +1 no inversion; -1 invert direction
-    step_mm: float = 10              # Step per key press (mm)
+    step_mm: float = 2              # Step per key press (mm)
 
 
 
@@ -62,9 +62,6 @@ class LiftAxis:
         self._extended_ticks: float = 0.0  # 连续累计
         # Zero reference (extended angle)
         self._z0_deg: float = 0.0
-
-        # Target (non-blocking)
-        self._target_mm: float = 0.0
 
         self._configured = False
 
@@ -146,35 +143,6 @@ class LiftAxis:
 
 
 
-    def set_height_target_mm(self, height_mm: float) -> None:
-        if not self.enabled: return
-        self._target_mm = max(self.cfg.soft_min_mm, min(self.cfg.soft_max_mm, height_mm))
-
-    def clear_target(self) -> None:
-        if not self.enabled: return
-        self._target_mm = None
-        self._bus.write("Goal_Velocity", self.cfg.name, 0.0)
-
-    def update(self) -> None:
-        """Call every frame (recommended 50–100 Hz)"""
-        if not self.enabled or self._target_mm is None: return
-        cur_mm = self.get_height_mm()
-        err = self._target_mm - cur_mm
-        # Position reached?
-        if abs(err) <= self.cfg.on_target_mm:
-            self._bus.write("Goal_Velocity", self.cfg.name, 0)
-            self._target_mm = None
-            return
-        # Simple P-controller
-        v = self.cfg.kp_vel * err
-        v = max(-self.cfg.v_max, min(self.cfg.v_max, v))
-        self._bus.write("Goal_Velocity", self.cfg.name, int(self.cfg.dir_sign * v))
-
-        # Read current for debug only
-        raw_cur_ma = int(self._bus.read("Present_Current", self.cfg.name, normalize=False))
-        cur_ma = raw_cur_ma * 6.5
-        print(f"[lift_axis.update] target={self._target_mm:.2f} mm, cur={cur_mm:.2f} mm, err={err:.2f} mm, v={v:.1f}| current={cur_ma} mA")
-
     # Lightweight coupling with action/obs
     def contribute_observation(self, obs: Dict[str, float]) -> None:
         """Export convenient observation fields: height_mm and velocity"""
@@ -196,10 +164,25 @@ class LiftAxis:
         key_h = f"{self.cfg.name}.height_mm"
         key_v = f"{self.cfg.name}.vel"
         if key_h in action:
-            self.set_height_target_mm(float(action[key_h]))
+            target_mm = float(action[key_h])
+            cur_mm = self.get_height_mm()
+            err = target_mm - cur_mm
+            if abs(err) <= self.cfg.on_target_mm:
+                v_cmd = 0
+            else:
+                v_cmd = self.cfg.kp_vel * err
+                if v_cmd > self.cfg.v_max:
+                    v_cmd = self.cfg.v_max
+                elif v_cmd < -self.cfg.v_max:
+                    v_cmd = -self.cfg.v_max
+            # Limit if already at boundary
+            if (cur_mm >= self.cfg.soft_max_mm and v_cmd > 0) or (
+                cur_mm <= self.cfg.soft_min_mm and v_cmd < 0
+            ):
+                v_cmd = 0
+            self._bus.write("Goal_Velocity", self.cfg.name, int(self.cfg.dir_sign * v_cmd))
         if key_v in action:
             # Direct velocity clears height target
-            self._target_mm = None
             v = int(action[key_v])
             v = max(-self.cfg.v_max, min(self.cfg.v_max, v))
             # Limit if already at boundary

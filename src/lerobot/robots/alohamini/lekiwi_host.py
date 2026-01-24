@@ -96,7 +96,6 @@ def main():
                 robot.stop_base()
 
             
-            robot.lift.update()
             last_observation = robot.get_observation()
 
             # Encode ndarrays to base64 strings
