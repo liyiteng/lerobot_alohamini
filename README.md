@@ -49,7 +49,7 @@ By default, serial ports cannot be accessed. We need to authorize the ports. The
 
 ### 4. Install conda3 and Environment Dependencies
 
-Install conda3
+Install conda3 
 ```
 mkdir -p ~/miniconda3
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
@@ -58,6 +58,8 @@ rm ~/miniconda3/miniconda.sh
 ~/miniconda3/bin/conda init bash
 source ~/.bashrc
 ```
+
+
 
 Initialize conda3
 ```
@@ -69,8 +71,17 @@ Install environment dependencies
 ```
 cd ~/lerobot_alohamini
 pip install -e .[all]
+pip install pyzmq
+pip install feetech-servo-sdk
 conda install ffmpeg=7.1.1 -c conda-forge
 ```
+
+
+Note:If installing on Raspberry Pi, make sure to use an ARM-specific conda distribution.
+
+# ARM build
+wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh \
+-O ~/miniforge3/miniforge.sh
 
 ### 5. Configure Robot Arm Port Numbers
 
@@ -241,7 +252,9 @@ python examples/alohamini/replay_bi.py  \
 ```
   lerobot-dataset-viz \
   --repo-id $HF_USER/so100_bi_test \
-  --episode-index 0
+  --episode-index 0 \
+  --display-compressed-images False
+
 ```
 
 ### 11. Local Training
