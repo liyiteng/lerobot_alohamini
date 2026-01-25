@@ -1,5 +1,5 @@
 ## Updates
-- **[2025-12-11]** Compatible with LeRobot 0.4.3
+- **[2025-1-25]** Compatible with LeRobot 0.4.3 Release
 - **[2025-11-06]** Compatible with LeRobot 0.4
 
 
