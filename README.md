@@ -79,7 +79,7 @@ conda install ffmpeg=7.1.1 -c conda-forge
 
 Note:If installing on Raspberry Pi, make sure to use an ARM-specific conda distribution.
 
-# ARM build
+//ARM build
 wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-aarch64.sh \
 -O ~/miniforge3/miniforge.sh
 
