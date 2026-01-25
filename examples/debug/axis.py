@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# axis.py - 带过流保护（PORT 参数化版）
+# axis.py - Overcurrent-protected axis demo (PORT parameterized)
 
 import time
 import argparse
@@ -7,12 +7,12 @@ from pynput import keyboard
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 
-# ==================== 常量配置 ==================== #
-SERVO_ID = 11               # 舵机 ID
-MODEL = "sts3215"           # 舵机型号
-SPEED_DEGPS = 180.0         # 转速 deg/s
-CURRENT_CUTOFF = 500.0      # 过流阈值 mA
-SAMPLES_TO_TRIGGER = 2      # 连续多少次超过阈值才触发
+# ==================== Constants ==================== #
+SERVO_ID = 11               # Servo ID
+MODEL = "sts3215"           # Servo model
+SPEED_DEGPS = 180.0         # Speed (deg/s)
+CURRENT_CUTOFF = 500.0      # Overcurrent threshold (mA)
+SAMPLES_TO_TRIGGER = 2      # Consecutive samples before triggering
 # ================================================= #
 
 STEPS_PER_DEG = 4096.0 / 360.0  # ≈11.377 ticks/deg
@@ -76,7 +76,7 @@ def main():
     over_cnt = 0
     try:
         while True:
-            # 1) 读当前电流
+            # 1) Read current
             try:
                 raw_current_ma = bus.read("Present_Current", name, normalize=False)
                 if isinstance(raw_current_ma, tuple):
@@ -89,7 +89,7 @@ def main():
             except Exception:
                 raw_current_ma = 0
 
-            # 2) 判断是否过流
+            # 2) Check for overcurrent
             if current_ma > CURRENT_CUTOFF:
                 over_cnt += 1
             else:
@@ -111,7 +111,7 @@ def main():
                     pass
                 return
 
-            # 3) 速度控制
+            # 3) Velocity control
             if pressed["up"] and not pressed["down"]:
                 raw = degps_to_raw(-SPEED_DEGPS)
             elif pressed["down"] and not pressed["up"]:

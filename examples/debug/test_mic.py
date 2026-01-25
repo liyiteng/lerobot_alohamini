@@ -18,7 +18,7 @@ def pick_input_device(devs):
         idx = int(env)
         if 0 <= idx < len(devs) and devs[idx].get("max_input_channels", 0) > 0:
             return idx
-    # 默认优先系统默认输入设备，否则选第一个有输入通道的
+    # Prefer the system default input; otherwise pick the first with input channels.
     try:
         import sounddevice as sd
         default_in = sd.default.device[0]
@@ -44,11 +44,11 @@ def record_3s_wav(device_idx, samplerate=16000, channels=1):
     print(f"[diag] 开始录音… 设备={device_idx}, 采样率={samplerate}Hz, 通道={channels}")
     audio = sd.rec(int(3 * samplerate), samplerate=samplerate, channels=channels, dtype="int16")
     sd.wait()
-    # 计算 RMS
+    # Compute RMS
     rms = float(np.sqrt(np.mean((audio.astype(np.float32) / 32768.0) ** 2)) + 1e-12)
     dbfs = 20 * math.log10(rms)
     print(f"[diag] 3秒录音完成。RMS={rms:.6f}, 约 {dbfs:.1f} dBFS（<-60 dBFS 往往表示太小/静音/麦克风静音）")
-    # 写 wav 文件
+    # Write wav file
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = tmp.name; tmp.close()
     with wave.open(tmp_path, "wb") as wf:

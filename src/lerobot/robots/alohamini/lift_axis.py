@@ -59,7 +59,7 @@ class LiftAxis:
 
         # Multi-turn tick tracking
         self._last_tick: float = 0.0
-        self._extended_ticks: float = 0.0  # 连续累计
+        self._extended_ticks: float = 0.0  # cumulative total
         # Zero reference (extended angle)
         self._z0_deg: float = 0.0
 
@@ -103,7 +103,7 @@ class LiftAxis:
         if not self.enabled: return
         self.configure()
         name = self.cfg.name
-        # 向下
+        # Move downward
         v_down = self.cfg.home_down_speed 
         self._bus.write("Goal_Velocity", name, v_down)
         stuck = 0
@@ -139,7 +139,7 @@ class LiftAxis:
         self._z0_deg = self._extended_deg()       
         print("Extended ticks after homing:", self._extended_ticks)
         h_now = self.get_height_mm()
-        print(f"[home] set-zero z0_deg={self._z0_deg:.2f}, height_now={h_now:.2f} mm")  # 这里应≈0
+        print(f"[home] set-zero z0_deg={self._z0_deg:.2f}, height_now={h_now:.2f} mm")  # should be ~0 here
 
 
 

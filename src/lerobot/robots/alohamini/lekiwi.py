@@ -140,8 +140,8 @@ class LeKiwi(Robot):
                 "x.vel",
                 "y.vel",
                 "theta.vel",
-                "lift_axis.height_mm",   # ← 新增
-                #"lift_axis.vel",         # ← 新增（可选，做调试用）
+                "lift_axis.height_mm",   # new
+                #"lift_axis.vel",         # new (optional, for debugging)
             ),
             float,
         )
@@ -233,13 +233,13 @@ class LeKiwi(Robot):
             self.left_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
 
         input("Move LEFT arm to the middle of its range of motion, then press ENTER...")
-        left_homing = self.left_bus.set_half_turn_homings(self.left_arm_motors)  # 仅左臂条目
+        left_homing = self.left_bus.set_half_turn_homings(self.left_arm_motors)  # left arm only
 
         for wheel in self.base_motors:
             left_homing[wheel] = 0
 
         motors_left_all = self.left_arm_motors + self.base_motors
-        full_turn_left = [m for m in motors_left_all if m.startswith("base_")]  # 三个轮子
+        full_turn_left = [m for m in motors_left_all if m.startswith("base_")]  # three wheels
         unknown_left = [m for m in motors_left_all if m not in full_turn_left]
 
         print("Move LEFT arm joints sequentially through full ROM. Press ENTER to stop...")

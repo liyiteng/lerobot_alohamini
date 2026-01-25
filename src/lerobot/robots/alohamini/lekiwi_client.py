@@ -330,7 +330,7 @@ class LeKiwiClient(Robot):
     
     # lift_axis.vel
     # def _from_keyboard_to_lift_action(self, pressed_keys: np.ndarray):
-    #     LIFT_VEL = 1000  # 觉得慢/快就改
+    #     LIFT_VEL = 1000  # adjust if too slow/fast
     #     up_pressed = self.teleop_keys.get("lift_up", "u") in pressed_keys
     #     dn_pressed = self.teleop_keys.get("lift_down", "j") in pressed_keys
 

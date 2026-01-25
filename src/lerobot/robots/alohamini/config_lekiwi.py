@@ -22,21 +22,21 @@ from ..config import RobotConfig
 
 def lekiwi_cameras_config() -> dict[str, CameraConfig]:
     return {
-        # "head_top": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_head_top", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "head_back": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_head_back", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "head_front": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_head_front", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "wrist_left": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "wrist_right": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_wrist_right", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
+        "head_top": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_head_top", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        ),
+        "head_back": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_head_back", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        ),
+        "head_front": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_head_front", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        ),
+        "wrist_left": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        ),
+        "wrist_right": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_wrist_right", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        ),
     }
 
 
@@ -98,7 +98,7 @@ class LeKiwiClientConfig(RobotConfig):
             # Speed control
             "speed_up": "r",
             "speed_down": "f",
-            # Z 轴
+            # Z axis
             "lift_up": "u",
             "lift_down": "j",
             # quit teleop
@@ -110,4 +110,3 @@ class LeKiwiClientConfig(RobotConfig):
 
     polling_timeout_ms: int = 15
     connect_timeout_s: int = 5
-

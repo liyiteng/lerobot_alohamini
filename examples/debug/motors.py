@@ -24,8 +24,8 @@ SCAN_END = 22
 
 def probe_scan_ids(port: str) -> dict[int, str]:
     """
-    探针扫描 ID 范围，返回 {id: model_name}（只含在线电机）。
-    仅做 ping，不对电机写寄存器；断开时不关力矩。
+    Probe-scan the ID range and return {id: model_name} for online motors only.
+    Only pings; does not write registers. Disconnect without disabling torque.
     """
 
     probe_bus = build_bus(port, {})
@@ -58,7 +58,7 @@ def probe_scan_ids(port: str) -> dict[int, str]:
 
 def build_motors_from_scan(port: str):
     """
-    基于 probe_scan_ids 结果，构建 motors 字典（名称统一为 motor_<id>）。
+    Build a motors dict from probe_scan_ids (names as motor_<id>).
     """
     from lerobot.motors.motors_bus import Motor, MotorNormMode
     found = probe_scan_ids(port)
@@ -125,13 +125,13 @@ def _motor_angle_from_position(position):
 
 def get_motors_states(port):
     """
-    动态表格显示电机状态；总是先扫描 [scan_start, scan_end]，只显示在线电机。
-    - 传了 motors 也不会直接用，而是按 ID 范围扫描后重建 motors（保证不读离线 ID）
+    Display a live table of motor states. Always scan [scan_start, scan_end] and show online motors only.
+    - Even if motors are provided, rebuild from scanned IDs to avoid reading offline IDs.
     """
     import time, sys, shutil
     from lerobot.motors.motors_bus import Motor, MotorNormMode
 
-    # ---------- ANSI 工具 ----------
+    # ---------- ANSI helpers ----------
     CSI = "\x1b["
     def _hide_cursor(): sys.stdout.write(f"{CSI}?25l"); sys.stdout.flush()
     def _show_cursor(): sys.stdout.write(f"{CSI}?25h"); sys.stdout.flush()
@@ -152,7 +152,7 @@ def get_motors_states(port):
             f"{F(st.get('Temperature'),4)} | {F(st.get('Port','-'),16,'<')}")
         return row[:maxw] if len(row) > maxw else row
 
-    # ---------- 第一步：用探针扫描在线电机 ----------
+    # ---------- Step 1: probe scan online motors ----------
 
     motors = build_motors_from_scan(port)
     if not motors:
@@ -160,9 +160,9 @@ def get_motors_states(port):
         return
 
 
-    # ---------- 第二步：用“只包含在线电机”的字典进入动态显示 ----------
+    # ---------- Step 2: display using only online motors ----------
     bus = build_bus(port, motors)
-    if not _connect_bus(bus):  # 你的辅助函数里保持 handshake=False 更稳
+    if not _connect_bus(bus):  # keep handshake=False in helper for stability
         return
 
     try:
@@ -213,7 +213,7 @@ def get_motors_states(port):
 
 
             maxw = _term_width()
-            sep  = "-" * min(maxw, 140)  # 由 120 放宽到 140
+            sep  = "-" * min(maxw, 140)  # expanded from 120 to 140
             header = (f"{'NAME':<15} | {'ID':>3} | {'POS':>6} | {'OFF':>6} | {'ANG':>6} | "
                     f"{'LOAD':>6} | {'ACC':>6} | {'VOLT':>4} | {'CURR(MA)':>8} | {'TEMP':>4} | PORT")
             header = header[:maxw] if len(header) > maxw else header
@@ -235,7 +235,7 @@ def get_motors_states(port):
     except KeyboardInterrupt:
         pass
     finally:
-        # 关键：不要在断开时去“对所有电机”关力矩，避免离线 ID 报错
+        # Important: do not disable torque for all motors on disconnect (offline IDs error).
         try:
             bus.disconnect(disable_torque=False)
         finally:
@@ -248,9 +248,9 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
     current_id = int(current_id)
     new_id = int(new_id)
     if current_id == new_id:
-        raise SystemExit("current_id == new_id，没有必要改。")
+        raise SystemExit("current_id == new_id; no change needed.")
 
-    # 1) 先用“裸总线”去 ping 校验（不带 motors 映射，避免库做多余事）
+    # 1) Use a bare bus to ping (no motors map to avoid extra work).
     probe_bus = FeetechMotorsBus(port=port, motors={})
     try:
         probe_bus.connect(handshake=False)
@@ -265,11 +265,11 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
             pass
 
     if not ok_cur:
-        raise SystemExit(f"[ABORT] 未发现 ID={current_id} 在线，放弃改 ID。")
+        raise SystemExit(f"[ABORT] ID={current_id} not found online; abort.")
     if ok_new:
-        raise SystemExit(f"[ABORT] 目标 ID={new_id} 已被占用，放弃改 ID。")
+        raise SystemExit(f"[ABORT] target ID={new_id} already in use; abort.")
 
-    # 2) 用“只包含 current_id 的单电机字典”建立总线（名字无所谓，只要 id 是 current_id）
+    # 2) Build a bus with only current_id (name doesn't matter, ID does).
     tmp_name = f"motor_{current_id}"
     one_motor = {
         tmp_name: Motor(id=current_id, model=DEFAULT_FEETECH_MODEL, norm_mode=MotorNormMode.RANGE_0_100)
@@ -280,7 +280,7 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
         bus.connect(handshake=False)
         print(f"Connected on port {bus.port} (current_id={current_id})")
 
-        # 保险：解锁 & 力矩处理（按你电机需要，可调整/删掉）
+        # Safety: unlock & torque handling (adjust/remove as needed).
         try:
             bus.write("Lock", tmp_name, 0, normalize=False)
         except Exception:
@@ -290,12 +290,12 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
         except Exception:
             pass
 
-        # 3) 直接对“当前 id 的那颗”写寄存器：ID = new_id
+        # 3) Write ID register for the current motor: ID = new_id
         bus.write("ID", tmp_name, new_id, normalize=False)
         time.sleep(0.2)
 
-        # 4) 改后校验：当前 id 应该失联，new_id 应该在线
-        # 这里用一个“空 bus”去 ping，避免受 motors 映射影响
+        # 4) Verify: current_id should be offline, new_id should be online.
+        # Use an empty bus for ping to avoid motors map influence.
         probe_bus2 = FeetechMotorsBus(port=port, motors={})
         try:
             probe_bus2.connect(handshake=False)
@@ -309,7 +309,7 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
 
         if ok_cur2 or not ok_new2:
             raise SystemExit(
-                f"[VERIFY FAIL] 改后验证失败：ID={current_id} 仍在线={ok_cur2}, ID={new_id} 在线={ok_new2}"
+                f"[VERIFY FAIL] Verification failed: ID={current_id} online={ok_cur2}, ID={new_id} online={ok_new2}"
             )
 
         print(f"[OK] Changed ID {current_id} -> {new_id} (model={DEFAULT_FEETECH_MODEL})")
@@ -386,16 +386,16 @@ def move_motor_to_position(
     position: int,
     ):
     """
-    直接用数值ID控制电机到指定 position（原始ticks）。
-    - 不需要 motors{}，不需要电机名。
-    - 默认确保处于“位置模式”，必要时切换。
+    Move a motor to a raw position using numeric ID.
+    - No motors{} dict or motor name needed.
+    - Ensures position mode, switching if needed.
     """
     tmp_name = f"motor_{int(motor_id)}"
     one_motor = {
         tmp_name: Motor(id=int(motor_id), model=DEFAULT_FEETECH_MODEL, norm_mode=MotorNormMode.RANGE_0_100)
     }
 
-    # 可选：简单范围夹取（12bit 0~4095；按你家实际寄存器范围调整）
+    # Optional: simple clamp (12-bit 0..4095; adjust for your register range).
     try:
         position = int(position)
         position = max(0, min(4095, position))
@@ -407,7 +407,7 @@ def move_motor_to_position(
         bus.connect(handshake=False)
         print(f"Connected on port {bus.port} (ID={motor_id})")
 
-        # 若不确定电机当前模式，保险起见切到“位置模式”
+        # If mode is unknown, switch to position mode for safety.
         bus.disable_torque(tmp_name)
         bus.write("Operating_Mode", tmp_name, OperatingMode.POSITION.value, normalize=False)
         bus.enable_torque(tmp_name)

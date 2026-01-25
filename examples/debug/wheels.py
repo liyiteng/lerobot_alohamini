@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-三全向轮（120°三轮）键盘遥控示例（Feetech，LeRobot 新版 API 习惯）
-- 仅 `--port` 作为命令行参数，其它均为全局常量。
-- 三个电机切到“速度模式（VELOCITY）”，写入 Goal_Speed（原始 16bit 值）。
-- 键位：W/S 前后，A/D 左右转，Q/E 左右平移，X 或 ESC 退出。
+3-omniwheel (120-degree) keyboard teleop demo (Feetech, new LeRobot API style).
+- Only `--port` is a CLI argument; everything else is global constants.
+- Three motors are set to VELOCITY mode and written via Goal_Speed (raw 16-bit).
+- Keys: W/S forward/back, A/D rotate left/right, Q/E strafe, X or ESC to quit.
 
-依赖：
+Dependencies:
   pip install pynput numpy
-用法：
+Usage:
   python omni_teleop_feetech_new_lerobot.py --port /dev/ttyACM0
 """
 from __future__ import annotations
@@ -22,21 +22,21 @@ from pynput import keyboard
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 
-# ------------------------ 全局常量（仅改这里） ------------------------ #
+# ------------------------ Global constants (edit here) ------------------------ #
 DEFAULT_PORT: str = "/dev/ttyACM0"
-MODEL: str = "sts3215"         # Feetech 型号
-LEFT_ID: int = 8                # 左轮电机 ID
-BACK_ID: int = 9                # 后轮电机 ID
-RIGHT_ID: int = 10              # 右轮电机 ID
-LIN_SPEED: float = 0.2         # 线速度 (m/s)
-ANG_SPEED: float = 80.0         # 角速度 (deg/s)
-WHEEL_RADIUS: float = 0.05      # 轮半径 (m)
-BASE_RADIUS: float = 0.125      # 轮到中心距离 (m)
-MAX_RAW: int = 3000             # 原始速度上限（统一缩放）
+MODEL: str = "sts3215"         # Feetech model
+LEFT_ID: int = 8                # Left wheel motor ID
+BACK_ID: int = 9                # Back wheel motor ID
+RIGHT_ID: int = 10              # Right wheel motor ID
+LIN_SPEED: float = 0.2         # Linear speed (m/s)
+ANG_SPEED: float = 80.0         # Angular speed (deg/s)
+WHEEL_RADIUS: float = 0.05      # Wheel radius (m)
+BASE_RADIUS: float = 0.125      # Wheel-to-center distance (m)
+MAX_RAW: int = 3000             # Raw speed limit (scaled)
 
 
 # def degps_to_raw(degps: float) -> int:
-#     """角速度(°/s) → Feetech 16bit 有符号编码（bit15=符号）。"""
+#     """Angular speed (deg/s) -> Feetech 16-bit signed encoding (bit15 is sign)."""
 #     steps_per_deg = 4096.0 / 360.0
 #     speed_in_steps = abs(degps) * steps_per_deg
 #     speed_int = int(round(speed_in_steps))
@@ -45,7 +45,7 @@ MAX_RAW: int = 3000             # 原始速度上限（统一缩放）
 #     return (speed_int | 0x8000) if degps < 0 else (speed_int & 0x7FFF)
 
 def degps_to_raw(degps: float) -> int:
-    """角速度(°/s) → 步/秒（范围 -32767..+32767），不做符号位编码。"""
+    """Angular speed (deg/s) -> steps/s (-32767..+32767), no sign-bit encoding."""
     steps_per_deg = 4096.0 / 360.0
     mag = int(round(abs(degps) * steps_per_deg))
     if mag > 0x7FFF:
@@ -61,7 +61,7 @@ def raw_to_degps(raw_speed: int) -> float:
     return -degps if (raw_speed & 0x8000) else degps
 
 
-# ------------------------ 正/逆运动学（等边三轮，夹角 120°） ------------------------ #
+# ------------------------ Kinematics (equilateral tri-wheel, 120 deg) ------------------------ #
 
 def body_to_wheel_raw(
     x_cmd: float,
@@ -72,10 +72,10 @@ def body_to_wheel_raw(
     base_radius: float = BASE_RADIUS,
     max_raw: int = MAX_RAW,
 ) -> Dict[str, int]:
-    """身体速度 → 三轮原始速度命令。
-    参数：x_cmd/y_cmd 单位 m/s；theta_cmd_degps 单位 °/s。
-    轮子安装角定义为相对 +y 轴顺时针方向：left=300°、back=180°、right=60°。
-    返回字典按名称：left_wheel/back_wheel/right_wheel。
+    """Body velocity -> per-wheel raw speed commands.
+    Args: x_cmd/y_cmd in m/s; theta_cmd_degps in deg/s.
+    Wheel mounting angles are defined clockwise from +y: left=300°, back=180°, right=60°.
+    Returns dict: left_wheel/back_wheel/right_wheel.
     """
     theta_rad = theta_cmd_degps * (np.pi / 180.0)
     vel = np.array([-x_cmd, -y_cmd, theta_rad])
@@ -88,7 +88,7 @@ def body_to_wheel_raw(
     w_rad = v_lin / wheel_radius            # rad/s
     w_degps = w_rad * (180.0 / np.pi)       # °/s
 
-    # 统一缩放，避免超过原始上限
+    # Scale to avoid exceeding raw limits.
     steps_per_deg = 4096.0 / 360.0
     raw_abs = np.abs(w_degps) * steps_per_deg
     peak = float(np.max(raw_abs)) if raw_abs.size else 0.0
@@ -120,13 +120,13 @@ def wheel_raw_to_body(
     return x_cmd, y_cmd, theta_cmd_degps
 
 
-# ------------------------ 键盘遥控器 ------------------------ #
+# ------------------------ Keyboard teleop ------------------------ #
 
 TELEOP_KEYS = {
     "forward": "w",
     "backward": "s",
-    "left": "a",          # 左平移
-    "right": "d",         # 右平移
+    "left": "a",          # Strafe left
+    "right": "d",         # Strafe right
     "rotate_left": "z",
     "rotate_right": "x",
     "quit": "q",
@@ -147,7 +147,7 @@ class OmniTeleop:
         self.lin_speed = float(LIN_SPEED)
         self.ang_speed = float(ANG_SPEED)
 
-    # ---- 键盘事件 ----
+    # ---- Keyboard events ----
     def _on_press(self, key):
         try:
             ch = key.char
@@ -175,7 +175,7 @@ class OmniTeleop:
             if ch == bind and action in self.pressed:
                 self.pressed[action] = False
 
-    # ---- 连接与模式切换 ----
+    # ---- Connect and mode switch ----
     def connect(self) -> None:
         self.bus.connect(handshake=False)
         print(f"Connected on port {self.bus.port}")
@@ -206,7 +206,7 @@ class OmniTeleop:
         except Exception:
             pass
 
-    # ---- 主循环 ----
+    # ---- Main loop ----
     def run(self):
         listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         listener.start()

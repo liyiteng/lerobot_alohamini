@@ -152,6 +152,8 @@ python examples/alohamini/teleoperate_bi.py \
 
 ```
 
+Note: After calibration, you need to power off the robotic arm once for the changes to take effect, for both the leader arms and the follower arms.
+
 #### 7.2 Teleoperation Command Summary
 
 Raspberry Pi side:
