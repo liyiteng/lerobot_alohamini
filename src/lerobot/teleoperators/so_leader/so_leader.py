@@ -41,16 +41,32 @@ class SOLeader(Teleoperator):
         super().__init__(config)
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = FeetechMotorsBus(
-            port=self.config.port,
-            motors={
+        if config.arm_profile == "am-arm-6dof":
+            motors = {
+                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                "wrist_roll": Motor(6, "sts3215", norm_mode_body),
+                "gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+            }
+        elif config.arm_profile == "so-arm-5dof":
+            motors = {
                 "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
                 "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
                 "elbow_flex": Motor(3, "sts3215", norm_mode_body),
                 "wrist_flex": Motor(4, "sts3215", norm_mode_body),
                 "wrist_roll": Motor(5, "sts3215", norm_mode_body),
                 "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
-            },
+            }
+        else:
+            raise ValueError(
+                f"Unknown arm_profile '{config.arm_profile}'. Expected 'so-arm-5dof' or 'am-arm-6dof'."
+            )
+        self.bus = FeetechMotorsBus(
+            port=self.config.port,
+            motors=motors,
             calibration=self.calibration,
         )
 
@@ -140,8 +156,21 @@ class SOLeader(Teleoperator):
     @check_if_not_connected
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
-        action = self.bus.sync_read("Present_Position")
-        action = {f"{motor}.pos": val for motor, val in action.items()}
+        raw_positions = self.bus.sync_read("Present_Position", normalize=False)
+        if "shoulder_lift" in raw_positions:
+            raw_positions["shoulder_lift"] = 4096 - raw_positions["shoulder_lift"]
+        ids_values = {self.bus.motors[motor].id: int(val) for motor, val in raw_positions.items()}
+        try:
+            norm_values = (
+                self.bus._normalize(ids_values)
+                if "Present_Position" in self.bus.normalized_data
+                else ids_values
+            )
+            action = {
+                f"{self.bus._id_to_name(id_)}.pos": val for id_, val in norm_values.items()
+            }
+        except RuntimeError:
+            action = {f"{motor}.pos": float(val) for motor, val in raw_positions.items()}
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action

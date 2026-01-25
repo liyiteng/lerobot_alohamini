@@ -17,6 +17,13 @@ parser.add_argument("--no_leader", action="store_true", help="Do not connect lea
 parser.add_argument("--fps", type=int, default=30, help="Main loop frequency (frames per second)")
 parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
 parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
+parser.add_argument(
+    "--leader_profile",
+    type=str,
+    default="so-arm-5dof",
+    choices=["so-arm-5dof", "am-arm-6dof"],
+    help="Leader arm profile selector.",
+)
 
 args = parser.parse_args()
 
@@ -33,8 +40,14 @@ if NO_LEADER:
 # Create configs
 robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id="my_alohamini")
 bi_cfg = BiSOLeaderConfig(
-    left_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_left"),
-    right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right"),
+    left_arm_config=SOLeaderConfig(
+        port="/dev/am_arm_leader_left",
+        arm_profile=args.leader_profile,
+    ),
+    right_arm_config=SOLeaderConfig(
+        port="/dev/am_arm_leader_right",
+        arm_profile=args.leader_profile,
+    ),
     id=args.leader_id,
 )
 leader = BiSOLeader(bi_cfg)

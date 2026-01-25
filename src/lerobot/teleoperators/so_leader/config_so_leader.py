@@ -30,6 +30,9 @@ class SOLeaderConfig:
     # Whether to use degrees for angles
     use_degrees: bool = False
 
+    # Arm profile selector: "so-arm" (5-DoF) or "am-arm" (6-DoF)
+    arm_profile: str = "so-arm-5dof"
+
 
 @TeleoperatorConfig.register_subclass("so101_leader")
 @TeleoperatorConfig.register_subclass("so100_leader")

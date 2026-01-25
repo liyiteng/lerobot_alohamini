@@ -31,6 +31,13 @@ def main():
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="Robot host IP")
     parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
     parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
+    parser.add_argument(
+        "--leader_profile",
+        type=str,
+        default="so-arm-5dof",
+        choices=["so-arm-5dof", "am-arm-6dof"],
+        help="Leader arm profile selector.",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
 
     args = parser.parse_args()
@@ -38,8 +45,14 @@ def main():
     # === Robot and teleop config ===
     robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
     leader_arm_config = BiSOLeaderConfig(
-        left_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_left"),
-        right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right"),
+        left_arm_config=SOLeaderConfig(
+            port="/dev/am_arm_leader_left",
+            arm_profile=args.leader_profile,
+        ),
+        right_arm_config=SOLeaderConfig(
+            port="/dev/am_arm_leader_right",
+            arm_profile=args.leader_profile,
+        ),
         id=args.leader_id,
     )
     keyboard_config = KeyboardTeleopConfig()

@@ -49,16 +49,32 @@ class SOFollower(Robot):
         self.config = config
         # choose normalization mode depending on config if available
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = FeetechMotorsBus(
-            port=self.config.port,
-            motors={
+        if config.arm_profile == "am-arm-6dof":
+            motors = {
+                "shoulder_pan": Motor(1, "sts3250", norm_mode_body),
+                "shoulder_lift": Motor(2, "sts3095", norm_mode_body),
+                "elbow_flex": Motor(3, "sts3250", norm_mode_body),
+                "wrist_flex": Motor(4, "sts3250", norm_mode_body),
+                "wrist_yaw": Motor(5, "sts3250", norm_mode_body),
+                "wrist_roll": Motor(6, "sts3250", norm_mode_body),
+                "gripper": Motor(7, "sts3250", MotorNormMode.RANGE_0_100),
+            }
+        elif config.arm_profile == "so-arm-5dof":
+            motors = {
                 "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
                 "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
                 "elbow_flex": Motor(3, "sts3215", norm_mode_body),
                 "wrist_flex": Motor(4, "sts3215", norm_mode_body),
                 "wrist_roll": Motor(5, "sts3215", norm_mode_body),
                 "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
-            },
+            }
+        else:
+            raise ValueError(
+                f"Unknown arm_profile '{config.arm_profile}'. Expected 'so-arm-5dof' or 'am-arm-6dof'."
+            )
+        self.bus = FeetechMotorsBus(
+            port=self.config.port,
+            motors=motors,
             calibration=self.calibration,
         )
         self.cameras = make_cameras_from_configs(config.cameras)
@@ -183,6 +199,16 @@ class SOFollower(Robot):
         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+
+        try:
+            currents = self.bus.sync_read("Present_Current")
+            currents_ma = {motor: val * 6.5 for motor, val in currents.items()}
+            print(
+                "Motor current (mA): "
+                + ", ".join(f"{motor}={currents_ma[motor]:.1f}" for motor in currents_ma)
+            )
+        except Exception as exc:
+            logger.debug(f"{self} read current failed: {exc}")
 
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():

@@ -41,6 +41,7 @@ class SOFollowerConfig:
 
     # Set to `True` for backward compatibility with previous policies/dataset
     use_degrees: bool = False
+    arm_profile: str = "so-arm-5dof"
 
 
 @RobotConfig.register_subclass("so101_follower")
