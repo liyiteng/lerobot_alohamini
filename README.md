@@ -118,9 +118,10 @@ Note: This operation must be performed every time you reconnect the robot arms o
 
 ### 6. Configure Camera Port Numbers
 
-Camera ports are already built into the Raspberry Pi and do not need configuration:
-lerobot/robots/alohamini/config_lekiwi.py
+Use `lerobot-find-cameras` to discover available cameras.
+This identifier may change after rebooting your computer or re-plugging the camera, depending largely on your operating system.
 
+Then, fill the detected camera port index into `lerobot/robots/alohamini/config_lekiwi.py`.
 
 Note:
 - Multiple cameras cannot be plugged into one USB Hub; 1 USB Hub only supports 1 camera
