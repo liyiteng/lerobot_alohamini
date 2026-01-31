@@ -117,7 +117,7 @@ class SOLeader(Teleoperator):
         input(f"Move {self} to the middle of its range of motion and press ENTER....")
         homing_offsets = self.bus.set_half_turn_homings()
 
-        full_turn_motor = "wrist_roll"
+        full_turn_motor = ""
         unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
         print(
             f"Move all joints except '{full_turn_motor}' sequentially through their "
@@ -157,6 +157,8 @@ class SOLeader(Teleoperator):
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
         raw_positions = self.bus.sync_read("Present_Position", normalize=False)
+        if "wrist_flex" in raw_positions:
+            raw_positions["wrist_flex"] = 4096 - raw_positions["wrist_flex"]
         ids_values = {self.bus.motors[motor].id: int(val) for motor, val in raw_positions.items()}
         try:
             norm_values = (
