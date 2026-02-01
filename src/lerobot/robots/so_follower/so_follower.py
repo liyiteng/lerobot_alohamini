@@ -51,13 +51,13 @@ class SOFollower(Robot):
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
         if config.arm_profile == "am-arm-6dof":
             motors = {
-                "shoulder_pan": Motor(1, "sts3250", norm_mode_body),
-                "shoulder_lift": Motor(2, "sts3095", norm_mode_body),
-                "elbow_flex": Motor(3, "sts3250", norm_mode_body),
-                "wrist_flex": Motor(4, "sts3250", norm_mode_body),
-                "wrist_yaw": Motor(5, "sts3250", norm_mode_body),
-                "wrist_roll": Motor(6, "sts3250", norm_mode_body),
-                "gripper": Motor(7, "sts3250", MotorNormMode.RANGE_0_100),
+                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                "wrist_roll": Motor(6, "sts3215", norm_mode_body),
+                "gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
             }
         elif config.arm_profile == "so-arm-5dof":
             motors = {
@@ -78,6 +78,7 @@ class SOFollower(Robot):
             calibration=self.calibration,
         )
         self.cameras = make_cameras_from_configs(config.cameras)
+        self._last_current_print_ts = 0.0
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -145,7 +146,7 @@ class SOFollower(Robot):
         homing_offsets = self.bus.set_half_turn_homings()
 
         # Attempt to call record_ranges_of_motion with a reduced motor set when appropriate.
-        full_turn_motor = "wrist_roll"
+        full_turn_motor = ""
         unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
         print(
             f"Move all joints except '{full_turn_motor}' sequentially through their "
@@ -203,10 +204,17 @@ class SOFollower(Robot):
         try:
             currents = self.bus.sync_read("Present_Current")
             currents_ma = {motor: val * 6.5 for motor, val in currents.items()}
-            print(
-                "Motor current (mA): "
-                + ", ".join(f"{motor}={currents_ma[motor]:.1f}" for motor in currents_ma)
-            )
+            now = time.perf_counter()
+            if now - self._last_current_print_ts >= 0.5:
+                self._last_current_print_ts = now
+                motors = list(self.bus.motors.keys())
+                lines = ["Motor current (mA):"]
+                lines += [
+                    f"  {motor:<12} {currents_ma[motor]:7.1f}"
+                    for motor in motors
+                    if motor in currents_ma
+                ]
+                print("\n".join(lines))
         except Exception as exc:
             logger.debug(f"{self} read current failed: {exc}")
 
