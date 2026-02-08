@@ -157,8 +157,6 @@ class SOLeader(Teleoperator):
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
         raw_positions = self.bus.sync_read("Present_Position", normalize=False)
-        if "wrist_flex" in raw_positions:
-            raw_positions["wrist_flex"] = 4096 - raw_positions["wrist_flex"]
         ids_values = {self.bus.motors[motor].id: int(val) for motor, val in raw_positions.items()}
         try:
             norm_values = (
