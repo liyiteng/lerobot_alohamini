@@ -347,17 +347,19 @@ class LeKiwiClient(Robot):
     def _from_keyboard_to_lift_action(self, pressed_keys: np.ndarray):
         up_pressed = self.teleop_keys.get("lift_up", "u") in pressed_keys
         dn_pressed = self.teleop_keys.get("lift_down", "j") in pressed_keys
+        now_pressed = up_pressed or dn_pressed
 
         # Read the last height (mm) reported by the Host
         h_now = float(self.last_remote_state.get("lift_axis.height_mm", 0.0))
 
-        if not (up_pressed or dn_pressed):
-            return {"lift_axis.height_mm": h_now}
+        if not now_pressed:
+            return {"lift_axis.height_mm": h_now, "lift_axis.vel": 0}
 
+        step_mm = 50.0
         if up_pressed and not dn_pressed:
-            target = LiftAxisConfig.soft_max_mm
+            target = h_now + step_mm
         elif dn_pressed and not up_pressed:
-            target = LiftAxisConfig.soft_min_mm
+            target = h_now - step_mm
         else:
             target = h_now
 
