@@ -89,10 +89,14 @@ while True:
     action = {**arm_actions, **base_action, **lift_action}
     log_rerun_data(observation, action)
 
-    if NO_ROBOT:
-        print(f"[NO_ROBOT] action → {action}")
-    else:
+    if not NO_ROBOT:
         robot.send_action(action)
-        print(f"Sent action → {action}")
 
     precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+    loop_dt = time.perf_counter() - t0
+    loop_fps = 1.0 / loop_dt if loop_dt > 0 else float("inf")
+
+    if NO_ROBOT:
+        print(f"[fps={loop_fps:.1f}] [NO_ROBOT] action → {action}")
+    else:
+        print(f"[fps={loop_fps:.1f}] Sent action → {action}")
