@@ -117,6 +117,7 @@ class LeKiwi(Robot):
         # Overcurrent debounce: require N consecutive over-limit reads
         self._overcurrent_count: dict[str, int] = {}
         self._overcurrent_trip_n = 20
+        self._last_currents_log_t = 0.0
 
 
     @property
@@ -601,12 +602,14 @@ class LeKiwi(Robot):
         if getattr(self, "right_bus", None):
             right_curr_raw = self.right_bus.sync_read("Present_Current", list(self.right_bus.motors.keys()))
 
-        if print_currents:
-            left_line = "{" + ",".join(str(int(v * scale)) for v in left_curr_raw.values()) + "}"
-            #print(f"Left Bus currents(ma): {left_line}")
+        now = time.monotonic()
+        if print_currents and (now - self._last_currents_log_t >= 1.0):
+            left_arr = [int(float(raw) * scale) for raw in left_curr_raw.values()]
+            print(f"[Currents][left_bus] {left_arr}")
             if right_curr_raw:
-                right_line = "{" + ",".join(str(int(v * scale)) for v in right_curr_raw.values()) + "}"
-                #print(f"Right Bus currents(ma): {right_line}")
+                right_arr = [int(float(raw) * scale) for raw in right_curr_raw.values()]
+                print(f"[Currents][right_bus] {right_arr}")
+            self._last_currents_log_t = now
 
         tripped = None
         for name, raw in {**left_curr_raw, **right_curr_raw}.items():
