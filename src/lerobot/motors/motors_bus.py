@@ -908,7 +908,7 @@ class MotorsBus(abc.ABC):
         motor: str,
         *,
         normalize: bool = True,
-        num_retry: int = 0,
+        num_retry: int = 3,
     ) -> Value:
         """Read a register from a motor.
 
@@ -974,7 +974,7 @@ class MotorsBus(abc.ABC):
 
     @check_if_not_connected
     def write(
-        self, data_name: str, motor: str, value: Value, *, normalize: bool = True, num_retry: int = 0
+        self, data_name: str, motor: str, value: Value, *, normalize: bool = True, num_retry: int = 3
     ) -> None:
         """Write a value to a single motor's register.
 
@@ -1011,7 +1011,7 @@ class MotorsBus(abc.ABC):
         motor_id: int,
         value: int,
         *,
-        num_retry: int = 0,
+        num_retry: int = 3,
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> tuple[int, int]:
@@ -1039,7 +1039,7 @@ class MotorsBus(abc.ABC):
         motors: str | list[str] | None = None,
         *,
         normalize: bool = True,
-        num_retry: int = 0,
+        num_retry: int = 3,
     ) -> dict[str, Value]:
         """Read the same register from several motors at once.
 
