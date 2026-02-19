@@ -52,13 +52,13 @@ class SOFollower(Robot):
         if config.arm_profile == "am-arm-6dof":
             motors = {
 
-                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "wrist_roll": Motor(6, "sts3215", norm_mode_body),
-                "gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+                "shoulder_pan": Motor(1, "sts3250", norm_mode_body),
+                "shoulder_lift": Motor(2, "sts3095", norm_mode_body),
+                "elbow_flex": Motor(3, "sts3095", norm_mode_body),
+                "wrist_flex": Motor(4, "sts3250", norm_mode_body),
+                "wrist_yaw": Motor(5, "sts3250", norm_mode_body),
+                "wrist_roll": Motor(6, "sts3250", norm_mode_body),
+                "gripper": Motor(7, "sts3250", MotorNormMode.RANGE_0_100),
             }
         elif config.arm_profile == "so-arm-5dof":
             motors = {
@@ -147,7 +147,7 @@ class SOFollower(Robot):
         homing_offsets = self.bus.set_half_turn_homings()
 
         # Attempt to call record_ranges_of_motion with a reduced motor set when appropriate.
-        full_turn_motor = ""
+        full_turn_motor = "wrist_roll"
         unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
         print(
             f"Move all joints except '{full_turn_motor}' sequentially through their "
