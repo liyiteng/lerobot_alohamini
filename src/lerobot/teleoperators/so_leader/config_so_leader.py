@@ -28,7 +28,7 @@ class SOLeaderConfig:
     port: str
 
     # Whether to use degrees for angles
-    use_degrees: bool = False
+    use_degrees: bool = True
 
     # Arm profile selector: "so-arm" (5-DoF) or "am-arm" (6-DoF)
     arm_profile: str = "so-arm-5dof"

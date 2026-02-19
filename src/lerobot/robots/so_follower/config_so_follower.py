@@ -40,8 +40,9 @@ class SOFollowerConfig:
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     # Set to `True` for backward compatibility with previous policies/dataset
-    use_degrees: bool = False
+    use_degrees: bool = True
     arm_profile: str = "so-arm-5dof"
+
 
 
 @RobotConfig.register_subclass("so101_follower")
