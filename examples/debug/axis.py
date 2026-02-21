@@ -11,7 +11,7 @@ from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 SERVO_ID = 11               # Servo ID
 MODEL = "sts3215"           # Servo model
 SPEED_DEGPS = 180.0         # Speed (deg/s)
-CURRENT_CUTOFF = 500.0      # Overcurrent threshold (mA)
+CURRENT_CUTOFF = 1000.0      # Overcurrent threshold (mA)
 SAMPLES_TO_TRIGGER = 2      # Consecutive samples before triggering
 # ================================================= #
 
