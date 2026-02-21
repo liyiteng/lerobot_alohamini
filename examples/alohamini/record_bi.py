@@ -32,11 +32,11 @@ def main():
     parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
     parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
     parser.add_argument(
-        "--leader_profile",
+        "--arm_profile",
         type=str,
         default="so-arm-5dof",
         choices=["so-arm-5dof", "am-arm-6dof"],
-        help="Leader arm profile selector.",
+        help="Arm profile selector used for both leader and follower consistency.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
 
@@ -47,11 +47,11 @@ def main():
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
             port="/dev/am_arm_leader_left",
-            arm_profile=args.leader_profile,
+            arm_profile=args.arm_profile,
         ),
         right_arm_config=SOLeaderConfig(
             port="/dev/am_arm_leader_right",
-            arm_profile=args.leader_profile,
+            arm_profile=args.arm_profile,
         ),
         id=args.leader_id,
     )

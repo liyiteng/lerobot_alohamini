@@ -136,9 +136,20 @@ Note:
 Host-side calibration:
 SSH into the Raspberry Pi, install the conda environment, then perform the following operations:
 
+##### SO‑ARM (5‑DoF)
+
+``` bash
+python -m lerobot.robots.alohamini.lekiwi_host \
+  --arm_profile so-arm-5dof
 ```
-python -m lerobot.robots.alohamini.lekiwi_host
+
+##### AM‑ARM (6‑DoF)
+
+``` bash
+python -m lerobot.robots.alohamini.lekiwi_host \
+  --arm_profile am-arm-6dof
 ```
+
 
 If executing for the first time, the system will prompt us to calibrate the robot arm. Position the robot arm as shown in the image, press Enter, then rotate each joint 90 degrees left, then 90 degrees right, then press Enter
 ![Calibration](examples/alohamini/media/mid_position_so100.png)  
@@ -146,10 +157,21 @@ If executing for the first time, the system will prompt us to calibrate the robo
 
 Client-side calibration:
 Execute the following command, replace the IP with the actual IP of the host Raspberry Pi, then repeat the above steps
+
+SO-ARM (5-DoF):
 ```
 python examples/alohamini/teleoperate_bi.py \
 --remote_ip 192.168.50.43 \
---leader_id so101_leader_bi
+--leader_id so101_leader_bi \
+--arm_profile so-arm-5dof
+```
+
+AM-ARM (6-DoF):
+```
+python examples/alohamini/teleoperate_bi.py \
+--remote_ip 192.168.50.43 \
+--leader_id so101_leader_bi \
+--arm_profile am-arm-6dof
 
 ```
 
@@ -159,35 +181,38 @@ Note: After calibration, you need to power off the robotic arm once for the chan
 
 Raspberry Pi side:
 
+##### SO‑ARM (5‑DoF)
+
+``` bash
+python -m lerobot.robots.alohamini.lekiwi_host \
+  --arm_profile so-arm-5dof
 ```
-python -m lerobot.robots.alohamini.lekiwi_host
+
+##### AM‑ARM (6‑DoF)
+
+``` bash
+python -m lerobot.robots.alohamini.lekiwi_host \
+  --arm_profile am-arm-6dof
 ```
 
 PC side:
-```
-// Normal teleoperation
 
+##### SO‑ARM (5‑DoF)
+
+``` 
 python examples/alohamini/teleoperate_bi.py \
---remote_ip 192.168.50.43 \
---leader_id so101_leader_bi
+  --remote_ip 192.168.50.43 \
+  --leader_id so101_leader_bi \
+  --arm_profile so-arm-5dof
+```
 
+##### AM‑ARM (6‑DoF)
 
-// Teleoperation with voice functionality
-python examples/alohamini/teleoperate_bi_voice.py \
---remote_ip 192.168.50.43 \
---leader_id so101_leader_bi
-
-
-Note: Voice functionality requires installing dependencies and setting DASHSCOPE_API_KEY
-
-// Install voice dependencies
-conda install -c conda-forge python-sounddevice
-pip install dashscope
-
-
-// Go to Alibaba Cloud Bailian website, apply for speech recognition API, execute the following command to add the API to environment variables
-
-export DASHSCOPE_API_KEY="sk-434f820ebaxxxxxxxxx"
+``` 
+python examples/alohamini/teleoperate_bi.py \
+  --remote_ip 192.168.50.43 \
+  --leader_id so101_leader_bi \
+  --arm_profile am-arm-6dof
 ```
 
 ### 8. Record Dataset
@@ -215,7 +240,10 @@ echo $HF_USER
 
 ```
 
+SO-ARM (5-DoF):
+
 //Create New Dataset
+
 ```
 python examples/alohamini/record_bi.py \
   --dataset $HF_USER/so100_bi_test \
@@ -225,7 +253,8 @@ python examples/alohamini/record_bi.py \
   --reset_time 8 \
   --task_description "pickup1" \
   --remote_ip 127.0.0.1 \
-  --leader_id so101_leader_bi
+  --leader_id so101_leader_bi \
+  --arm_profile so-arm-5dof
 
 ```
 
@@ -240,9 +269,13 @@ python examples/alohamini/record_bi.py \
   --task_description "pickup1" \
   --remote_ip 127.0.0.1 \
   --leader_id so101_leader_bi \
+  --arm_profile so-arm-5dof \
   --resume 
 
 ```
+
+AM-ARM (6-DoF): identical command, only change `arm_profile=am-arm-6dof`.
+
 
 ### 9. Replay Dataset
 ```
