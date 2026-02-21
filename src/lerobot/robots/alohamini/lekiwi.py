@@ -59,18 +59,85 @@ class LeKiwi(Robot):
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
 
-
-        self.left_bus = FeetechMotorsBus(
-            port=self.config.left_port,
-            motors={
-                # arm
+        if config.arm_profile == "am-arm-6dof":
+            left_arm_motors_cfg = {
+                "arm_left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_left_shoulder_lift": Motor(2, "sts3095", norm_mode_body),
+                "arm_left_elbow_flex": Motor(3, "sts3095", norm_mode_body),
+                "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                "arm_left_wrist_roll": Motor(6, "sts3215", norm_mode_body),
+                "arm_left_gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+            }
+            right_arm_motors_cfg = {
+                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_right_shoulder_lift": Motor(2, "sts3095", norm_mode_body),
+                "arm_right_elbow_flex": Motor(3, "sts3095", norm_mode_body),
+                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
+                "arm_right_wrist_roll": Motor(6, "sts3215", norm_mode_body),
+                "arm_right_gripper": Motor(7, "sts3215", MotorNormMode.RANGE_0_100),
+            }
+            self._left_arm_state_keys = (
+                "arm_left_shoulder_pan.pos",
+                "arm_left_shoulder_lift.pos",
+                "arm_left_elbow_flex.pos",
+                "arm_left_wrist_flex.pos",
+                "arm_left_wrist_yaw.pos",
+                "arm_left_wrist_roll.pos",
+                "arm_left_gripper.pos",
+            )
+            self._right_arm_state_keys = (
+                "arm_right_shoulder_pan.pos",
+                "arm_right_shoulder_lift.pos",
+                "arm_right_elbow_flex.pos",
+                "arm_right_wrist_flex.pos",
+                "arm_right_wrist_yaw.pos",
+                "arm_right_wrist_roll.pos",
+                "arm_right_gripper.pos",
+            )
+        elif config.arm_profile == "so-arm-5dof":
+            left_arm_motors_cfg = {
                 "arm_left_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
                 "arm_left_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
                 "arm_left_elbow_flex": Motor(3, "sts3215", norm_mode_body),
                 "arm_left_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                #"arm_left_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
                 "arm_left_wrist_roll": Motor(5, "sts3215", norm_mode_body),
                 "arm_left_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+            }
+            right_arm_motors_cfg = {
+                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "arm_right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
+                "arm_right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+            }
+            self._left_arm_state_keys = (
+                "arm_left_shoulder_pan.pos",
+                "arm_left_shoulder_lift.pos",
+                "arm_left_elbow_flex.pos",
+                "arm_left_wrist_flex.pos",
+                "arm_left_wrist_roll.pos",
+                "arm_left_gripper.pos",
+            )
+            self._right_arm_state_keys = (
+                "arm_right_shoulder_pan.pos",
+                "arm_right_shoulder_lift.pos",
+                "arm_right_elbow_flex.pos",
+                "arm_right_wrist_flex.pos",
+                "arm_right_wrist_roll.pos",
+                "arm_right_gripper.pos",
+            )
+        else:
+            raise ValueError(
+                f"Unknown arm_profile '{config.arm_profile}'. Expected 'so-arm-5dof' or 'am-arm-6dof'."
+            )
+
+        self.left_bus = FeetechMotorsBus(
+            port=self.config.left_port,
+            motors={
+                **left_arm_motors_cfg,
                 # base
                 "base_left_wheel": Motor(8, "sts3215", MotorNormMode.RANGE_M100_100),
                 "base_back_wheel": Motor(9, "sts3215", MotorNormMode.RANGE_M100_100),
@@ -83,14 +150,7 @@ class LeKiwi(Robot):
         self.right_bus = FeetechMotorsBus(
             port=self.config.right_port,
             motors={
-                # arm
-                "arm_right_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "arm_right_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "arm_right_elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "arm_right_wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                #"arm_right_wrist_yaw": Motor(5, "sts3215", norm_mode_body),
-                "arm_right_wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "arm_right_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                **right_arm_motors_cfg,
                 #"lift_axis": Motor(12, "sts3215", MotorNormMode.DEGREES),
             },
             calibration=self.calibration,
@@ -124,20 +184,8 @@ class LeKiwi(Robot):
     def _state_ft(self) -> dict[str, type]:
         return dict.fromkeys(
             (
-                "arm_left_shoulder_pan.pos",
-                "arm_left_shoulder_lift.pos",
-                "arm_left_elbow_flex.pos",
-                "arm_left_wrist_flex.pos",
-                #"left_wrist_yaw.pos",
-                "arm_left_wrist_roll.pos",
-                "arm_left_gripper.pos",
-                "arm_right_shoulder_pan.pos",
-                "arm_right_shoulder_lift.pos",
-                "arm_right_elbow_flex.pos",
-                "arm_right_wrist_flex.pos",
-                #"right_wrist_yaw.pos",
-                "arm_right_wrist_roll.pos",
-                "arm_right_gripper.pos",
+                *self._left_arm_state_keys,
+                *self._right_arm_state_keys,
                 "x.vel",
                 "y.vel",
                 "theta.vel",

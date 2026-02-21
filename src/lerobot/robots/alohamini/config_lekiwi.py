@@ -22,21 +22,21 @@ from ..config import RobotConfig
 
 def lekiwi_cameras_config() -> dict[str, CameraConfig]:
     return {
-        "head_top": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_head_top", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        ),
-        "head_back": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_head_back", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        ),
-        "head_front": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_head_front", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        ),
-        "wrist_left": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        ),
-        "wrist_right": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_wrist_right", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        ),
+        # "head_top": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_head_top", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "head_back": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_head_back", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "head_front": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_head_front", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "wrist_left": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "wrist_right": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_wrist_right", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+        # ),
     }
 
 
@@ -46,6 +46,7 @@ class LeKiwiConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
     right_port: str = "/dev/am_arm_follower_right"  # port to connect to the bus
     disable_torque_on_disconnect: bool = True
+    arm_profile: str = "so-arm-5dof"  # "am-arm-6dof" or "so-arm-5dof"
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as

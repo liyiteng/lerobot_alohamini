@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import base64
+import argparse
 import json
 import logging
 import time
@@ -49,9 +50,20 @@ class LeKiwiHost:
  
 
 def main():
+    parser = argparse.ArgumentParser(description="Run AlohaMini LeKiwi host process")
+    parser.add_argument(
+        "--arm_profile",
+        type=str,
+        default="so-arm-5dof",
+        choices=["so-arm-5dof", "am-arm-6dof"],
+        help="Follower arm profile selector.",
+    )
+    args = parser.parse_args()
+
     logging.info("Configuring LeKiwi")
     robot_config = LeKiwiConfig()
     robot_config.id = "AlohaMiniRobot"
+    robot_config.arm_profile = args.arm_profile
     robot = LeKiwi(robot_config)
 
 
