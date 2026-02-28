@@ -145,7 +145,7 @@ def get_motors_states(port):
             s = "-" if v is None else str(v)
             if len(s) > w: s = s[:w]
             return f"{s:{a}{w}}"
-        row = (f"{F(name,15,'<')} | {F(st.get('ID'),3)} | {F(st.get('Position'),6)} | "
+        row = (f"{F(name,15,'<')} | {F(st.get('ID'),3)} | {F(st.get('Model'),8,'<')} | {F(st.get('Position'),6)} | "
             f"{F(st.get('Offset'),6)} | {F(st.get('Angle'),6)} | "
             f"{F(st.get('Load'),6)} | {F(st.get('Acceleration'),6)} | "
             f"{F(st.get('Voltage'),4)} | {F(st.get('Current(mA)'),8)} | "
@@ -191,6 +191,7 @@ def get_motors_states(port):
                 try:
                     st = {
                         "ID":           bus.read("ID", name, normalize=False),
+                        "Model":        getattr(bus.motors.get(name), "model", None),
                         "Position":     pos.get(name),
                         "Load":         load.get(name),
                         "Acceleration": acc.get(name),
@@ -214,7 +215,7 @@ def get_motors_states(port):
 
             maxw = _term_width()
             sep  = "-" * min(maxw, 140)  # expanded from 120 to 140
-            header = (f"{'NAME':<15} | {'ID':>3} | {'POS':>6} | {'OFF':>6} | {'ANG':>6} | "
+            header = (f"{'NAME':<15} | {'ID':>3} | {'MODEL':<8} | {'POS':>6} | {'OFF':>6} | {'ANG':>6} | "
                     f"{'LOAD':>6} | {'ACC':>6} | {'VOLT':>4} | {'CURR(MA)':>8} | {'TEMP':>4} | PORT")
             header = header[:maxw] if len(header) > maxw else header
             frame_lines = [sep, header] + [_format_row(n, s, maxw) for (n, s) in rows] + \
