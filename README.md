@@ -240,7 +240,7 @@ echo $HF_USER
 
 ```
 
-SO-ARM (5-DoF):
+##### SO-ARM (5-DoF):
 
 //Create New Dataset
 
@@ -290,7 +290,7 @@ python examples/alohamini/replay_bi.py  \
   lerobot-dataset-viz \
   --repo-id $HF_USER/so100_bi_test \
   --episode-index 0 \
-  --display-compressed-images False
+  --display-compressed-images
 
 ```
 
