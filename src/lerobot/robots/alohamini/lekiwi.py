@@ -288,10 +288,16 @@ class LeKiwi(Robot):
             left_homing[wheel] = 0
 
         motors_left_all = self.left_arm_motors + self.base_motors
-        full_turn_left = [m for m in motors_left_all if m.startswith("base_")]  # three wheels
+        left_full_turn_motor = "arm_left_wrist_roll"
+        full_turn_left = [m for m in motors_left_all if m.startswith("base_")]  # three base wheels
+        if left_full_turn_motor in motors_left_all:
+            full_turn_left.append(left_full_turn_motor)
         unknown_left = [m for m in motors_left_all if m not in full_turn_left]
 
-        print("Move LEFT arm joints sequentially through full ROM. Press ENTER to stop...")
+        print(
+            f"Move LEFT arm joints sequentially through full ROM (except '{left_full_turn_motor}'). "
+            "Press ENTER to stop..."
+        )
         l_mins, l_maxs = self.left_bus.record_ranges_of_motion(unknown_left)
         for m in full_turn_left:
             l_mins[m] = 0
@@ -308,8 +314,18 @@ class LeKiwi(Robot):
             input("Move RIGHT arm to the middle of its range of motion, then press ENTER...")
             right_homing = self.right_bus.set_half_turn_homings(self.right_arm_motors)
 
-            print("Move RIGHT arm joints sequentially through full ROM. Press ENTER to stop...")
-            r_mins, r_maxs = self.right_bus.record_ranges_of_motion(self.right_arm_motors)
+            right_full_turn_motor = "arm_right_wrist_roll"
+            full_turn_right = [right_full_turn_motor] if right_full_turn_motor in self.right_arm_motors else []
+            unknown_right = [m for m in self.right_arm_motors if m not in full_turn_right]
+
+            print(
+                f"Move RIGHT arm joints sequentially through full ROM (except '{right_full_turn_motor}'). "
+                "Press ENTER to stop..."
+            )
+            r_mins, r_maxs = self.right_bus.record_ranges_of_motion(unknown_right)
+            for m in full_turn_right:
+                r_mins[m] = 0
+                r_maxs[m] = 4095
 
         # Merge → filter by bus and write back → save as a single file
         self.calibration = {}

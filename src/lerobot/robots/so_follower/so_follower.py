@@ -80,6 +80,9 @@ class SOFollower(Robot):
         )
         self.cameras = make_cameras_from_configs(config.cameras)
         self._last_current_print_ts = 0.0
+        self._overcurrent_count: dict[str, int] = {}
+        self._overcurrent_limit_ma = 2000.0
+        self._overcurrent_trip_n = 20
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -216,6 +219,40 @@ class SOFollower(Robot):
                     if motor in currents_ma
                 ]
                 print("\n".join(lines))
+
+            tripped_motor = None
+            tripped_current = 0.0
+            for motor, current_ma in currents_ma.items():
+                if current_ma > self._overcurrent_limit_ma:
+                    self._overcurrent_count[motor] = self._overcurrent_count.get(motor, 0) + 1
+                else:
+                    self._overcurrent_count[motor] = 0
+
+                if self._overcurrent_count[motor] >= self._overcurrent_trip_n:
+                    tripped_motor = motor
+                    tripped_current = current_ma
+                    break
+
+            if tripped_motor is not None:
+                logger.error(
+                    f"Overcurrent protection triggered on '{tripped_motor}': "
+                    f"{tripped_current:.1f}mA > {self._overcurrent_limit_ma:.1f}mA "
+                    f"for {self._overcurrent_count[tripped_motor]} consecutive reads. "
+                    "Disabling torque and disconnecting."
+                )
+                try:
+                    self.bus.disable_torque(num_retry=0)
+                except Exception:
+                    pass
+                try:
+                    self.disconnect()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Overcurrent protection triggered on '{tripped_motor}' ({tripped_current:.1f}mA)."
+                )
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.debug(f"{self} read current failed: {exc}")
 
