@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 3-omniwheel (120-degree) keyboard teleop demo (Feetech, new LeRobot API style).
 - Only `--port` is a CLI argument; everything else is global constants.
@@ -11,10 +10,11 @@ Dependencies:
 Usage:
   python omni_teleop_feetech_new_lerobot.py --port /dev/ttyACM0
 """
+
 from __future__ import annotations
+
 import argparse
 import time
-from typing import Dict, List
 
 import numpy as np
 from pynput import keyboard
@@ -24,15 +24,15 @@ from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 
 # ------------------------ Global constants (edit here) ------------------------ #
 DEFAULT_PORT: str = "/dev/ttyACM0"
-MODEL: str = "sts3215"         # Feetech model
-LEFT_ID: int = 8                # Left wheel motor ID
-BACK_ID: int = 9                # Back wheel motor ID
-RIGHT_ID: int = 10              # Right wheel motor ID
-LIN_SPEED: float = 0.2         # Linear speed (m/s)
-ANG_SPEED: float = 80.0         # Angular speed (deg/s)
-WHEEL_RADIUS: float = 0.05      # Wheel radius (m)
-BASE_RADIUS: float = 0.125      # Wheel-to-center distance (m)
-MAX_RAW: int = 3000             # Raw speed limit (scaled)
+MODEL: str = "sts3215"  # Feetech model
+LEFT_ID: int = 8  # Left wheel motor ID
+BACK_ID: int = 9  # Back wheel motor ID
+RIGHT_ID: int = 10  # Right wheel motor ID
+LIN_SPEED: float = 0.2  # Linear speed (m/s)
+ANG_SPEED: float = 80.0  # Angular speed (deg/s)
+WHEEL_RADIUS: float = 0.05  # Wheel radius (m)
+BASE_RADIUS: float = 0.125  # Wheel-to-center distance (m)
+MAX_RAW: int = 3000  # Raw speed limit (scaled)
 
 
 # def degps_to_raw(degps: float) -> int:
@@ -44,6 +44,7 @@ MAX_RAW: int = 3000             # Raw speed limit (scaled)
 #         speed_int = 0x7FFF
 #     return (speed_int | 0x8000) if degps < 0 else (speed_int & 0x7FFF)
 
+
 def degps_to_raw(degps: float) -> int:
     """Angular speed (deg/s) -> steps/s (-32767..+32767), no sign-bit encoding."""
     steps_per_deg = 4096.0 / 360.0
@@ -51,7 +52,6 @@ def degps_to_raw(degps: float) -> int:
     if mag > 0x7FFF:
         mag = 0x7FFF
     return -mag if degps < 0 else mag
-
 
 
 def raw_to_degps(raw_speed: int) -> float:
@@ -63,6 +63,7 @@ def raw_to_degps(raw_speed: int) -> float:
 
 # ------------------------ Kinematics (equilateral tri-wheel, 120 deg) ------------------------ #
 
+
 def body_to_wheel_raw(
     x_cmd: float,
     y_cmd: float,
@@ -71,7 +72,7 @@ def body_to_wheel_raw(
     wheel_radius: float = WHEEL_RADIUS,
     base_radius: float = BASE_RADIUS,
     max_raw: int = MAX_RAW,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Body velocity -> per-wheel raw speed commands.
     Args: x_cmd/y_cmd in m/s; theta_cmd_degps in deg/s.
     Wheel mounting angles are defined clockwise from +y: left=300°, back=180°, right=60°.
@@ -80,13 +81,13 @@ def body_to_wheel_raw(
     theta_rad = theta_cmd_degps * (np.pi / 180.0)
     vel = np.array([-x_cmd, -y_cmd, theta_rad])
 
-    #angles = np.radians(np.array([300, 180, 60]))
-    angles = np.radians(np.array([240,0,120]) - 90)
+    # angles = np.radians(np.array([300, 180, 60]))
+    angles = np.radians(np.array([240, 0, 120]) - 90)
     M = np.array([[np.cos(a), np.sin(a), base_radius] for a in angles])
 
-    v_lin = M.dot(vel)                      # m/s
-    w_rad = v_lin / wheel_radius            # rad/s
-    w_degps = w_rad * (180.0 / np.pi)       # °/s
+    v_lin = M.dot(vel)  # m/s
+    w_rad = v_lin / wheel_radius  # rad/s
+    w_degps = w_rad * (180.0 / np.pi)  # °/s
 
     # Scale to avoid exceeding raw limits.
     steps_per_deg = 4096.0 / 360.0
@@ -101,15 +102,15 @@ def body_to_wheel_raw(
 
 
 def wheel_raw_to_body(
-    wheel_raw: Dict[str, int], *, wheel_radius: float = WHEEL_RADIUS, base_radius: float = BASE_RADIUS
+    wheel_raw: dict[str, int], *, wheel_radius: float = WHEEL_RADIUS, base_radius: float = BASE_RADIUS
 ) -> tuple[float, float, float]:
     raw_list = [int(wheel_raw.get(n, 0)) for n in ("left_wheel", "back_wheel", "right_wheel")]
     w_degps = np.array([raw_to_degps(r) for r in raw_list])
     w_rad = w_degps * (np.pi / 180.0)
     v_lin = w_rad * wheel_radius
 
-    #angles = np.radians(np.array([300, 180, 60]))
-    angles = np.radians(np.array([240,0,120]) - 90)
+    # angles = np.radians(np.array([300, 180, 60]))
+    angles = np.radians(np.array([240, 0, 120]) - 90)
 
     M = np.array([[np.cos(a), np.sin(a), base_radius] for a in angles])
     M_inv = np.linalg.inv(M)
@@ -125,10 +126,10 @@ def wheel_raw_to_body(
 TELEOP_KEYS = {
     "forward": "w",
     "backward": "s",
-    "left": "a",          # Strafe left
-    "right": "d",         # Strafe right
-    "rotate_left": "z",
-    "rotate_right": "x",
+    "left": "z",  # Strafe left
+    "right": "x",  # Strafe right
+    "rotate_left": "a",
+    "rotate_right": "d",
     "quit": "q",
 }
 
@@ -136,13 +137,13 @@ TELEOP_KEYS = {
 class OmniTeleop:
     def __init__(self, port: str):
         self.motors = {
-            "left_wheel":  Motor(id=LEFT_ID,  model=MODEL, norm_mode=MotorNormMode.RANGE_0_100),
-            "back_wheel":  Motor(id=BACK_ID,  model=MODEL, norm_mode=MotorNormMode.RANGE_0_100),
+            "left_wheel": Motor(id=LEFT_ID, model=MODEL, norm_mode=MotorNormMode.RANGE_0_100),
+            "back_wheel": Motor(id=BACK_ID, model=MODEL, norm_mode=MotorNormMode.RANGE_0_100),
             "right_wheel": Motor(id=RIGHT_ID, model=MODEL, norm_mode=MotorNormMode.RANGE_0_100),
         }
         self.bus = FeetechMotorsBus(port=port, motors=self.motors)
         self.running = True
-        self.pressed = {k: False for k in TELEOP_KEYS}
+        self.pressed = dict.fromkeys(TELEOP_KEYS, False)
 
         self.lin_speed = float(LIN_SPEED)
         self.ang_speed = float(ANG_SPEED)
@@ -212,12 +213,24 @@ class OmniTeleop:
         listener.start()
         try:
             while self.running:
-                x = self.lin_speed if self.pressed.get("forward") else (-self.lin_speed if self.pressed.get("backward") else 0.0)
-                y = self.lin_speed if self.pressed.get("left")    else (-self.lin_speed if self.pressed.get("right")    else 0.0)
-                th = self.ang_speed if self.pressed.get("rotate_left") else (-self.ang_speed if self.pressed.get("rotate_right") else 0.0)
+                x = (
+                    self.lin_speed
+                    if self.pressed.get("forward")
+                    else (-self.lin_speed if self.pressed.get("backward") else 0.0)
+                )
+                y = (
+                    self.lin_speed
+                    if self.pressed.get("left")
+                    else (-self.lin_speed if self.pressed.get("right") else 0.0)
+                )
+                th = (
+                    self.ang_speed
+                    if self.pressed.get("rotate_left")
+                    else (-self.ang_speed if self.pressed.get("rotate_right") else 0.0)
+                )
 
                 wheel_cmds = body_to_wheel_raw(x, y, th)
-                names: List[str] = list(self.motors.keys())
+                names: list[str] = list(self.motors.keys())
                 raw_vals = [wheel_cmds[n] for n in names]
                 for name, val in zip(names, raw_vals):
                     self.bus.write("Goal_Velocity", name, val, normalize=False)
@@ -251,6 +264,7 @@ class OmniTeleop:
 
 
 # ------------------------ CLI ------------------------ #
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Feetech 3-omni teleop (globals-only)")

@@ -1,9 +1,7 @@
-import sys
-import os
 import argparse
+import os
+import sys
 import time
-import ast
-import json
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import (
@@ -21,6 +19,7 @@ SCAN_END = 22
 
 
 # --------------------------- Probe / Scan helpers (reusable) --------------------------- #
+
 
 def probe_scan_ids(port: str) -> dict[int, str]:
     """
@@ -61,6 +60,7 @@ def build_motors_from_scan(port: str):
     Build a motors dict from probe_scan_ids (names as motor_<id>).
     """
     from lerobot.motors.motors_bus import Motor, MotorNormMode
+
     found = probe_scan_ids(port)
     if not found:
         return {}
@@ -71,12 +71,9 @@ def build_motors_from_scan(port: str):
     return motors
 
 
-
-
-
 def parse_actions(file_path):
     actions = []
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -106,6 +103,7 @@ def build_bus(port, motors):
 
 # --------------------------- High‑level helpers --------------------------- #
 
+
 def _connect_bus(bus):
     try:
         bus.connect(handshake=False)
@@ -119,37 +117,65 @@ def _connect_bus(bus):
 def _motor_angle_from_position(position):
     return position / (4096 // 2) * HALF_TURN_DEGREE
 
+
 # -------------------------------------------------------------- #
 # ---------------------------Function--------------------------- #
 # -------------------------------------------------------------- #
+
 
 def get_motors_states(port):
     """
     Display a live table of motor states. Always scan [scan_start, scan_end] and show online motors only.
     - Even if motors are provided, rebuild from scanned IDs to avoid reading offline IDs.
     """
-    import time, sys, shutil
-    from lerobot.motors.motors_bus import Motor, MotorNormMode
+    import shutil
+    import time
+
+    # Enable ANSI escape codes on Windows (no-op on other platforms).
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
 
     # ---------- ANSI helpers ----------
     CSI = "\x1b["
-    def _hide_cursor(): sys.stdout.write(f"{CSI}?25l"); sys.stdout.flush()
-    def _show_cursor(): sys.stdout.write(f"{CSI}?25h"); sys.stdout.flush()
-    def _move_up(n):    sys.stdout.write(f"{CSI}{n}A") if n>0 else None; sys.stdout.flush()
-    def _clear_line():  sys.stdout.write(f"{CSI}2K\r")
+
+    def _hide_cursor():
+        sys.stdout.write(f"{CSI}?25l")
+        sys.stdout.flush()
+
+    def _show_cursor():
+        sys.stdout.write(f"{CSI}?25h")
+        sys.stdout.flush()
+
+    def _move_up(n):
+        sys.stdout.write(f"{CSI}{n}A") if n > 0 else None
+        sys.stdout.flush()
+
+    def _clear_line():
+        sys.stdout.write(f"{CSI}2K\r")
+
     def _term_width():
-        try: return max(60, min(200, shutil.get_terminal_size().columns))
-        except Exception: return 100
+        try:
+            return max(60, min(200, shutil.get_terminal_size().columns))
+        except Exception:
+            return 100
+
     def _format_row(name: str, st: dict, maxw: int) -> str:
         def F(v, w, a=">"):
             s = "-" if v is None else str(v)
-            if len(s) > w: s = s[:w]
+            if len(s) > w:
+                s = s[:w]
             return f"{s:{a}{w}}"
-        row = (f"{F(name,15,'<')} | {F(st.get('ID'),3)} | {F(st.get('Model'),8,'<')} | {F(st.get('Position'),6)} | "
-            f"{F(st.get('Offset'),6)} | {F(st.get('Angle'),6)} | "
-            f"{F(st.get('Load'),6)} | {F(st.get('Acceleration'),6)} | "
-            f"{F(st.get('Voltage'),4)} | {F(st.get('Current(mA)'),8)} | "
-            f"{F(st.get('Temperature'),4)} | {F(st.get('Port','-'),16,'<')}")
+
+        row = (
+            f"{F(name, 15, '<')} | {F(st.get('ID'), 3)} | {F(st.get('Model'), 8, '<')} | {F(st.get('Position'), 6)} | "
+            f"{F(st.get('Offset'), 6)} | {F(st.get('Angle'), 6)} | "
+            f"{F(st.get('Acceleration'), 6)} | "
+            f"{F(st.get('Voltage'), 4)} | {F(st.get('Current(mA)'), 8)} | "
+            f"{F(st.get('Temperature'), 4)} | {F(st.get('Phase'), 5)}"
+        )
         return row[:maxw] if len(row) > maxw else row
 
     # ---------- Step 1: probe scan online motors ----------
@@ -158,7 +184,6 @@ def get_motors_states(port):
     if not motors:
         print(f"No motors found in ID range [{SCAN_START}, {SCAN_END}] on {port}.")
         return
-
 
     # ---------- Step 2: display using only online motors ----------
     bus = build_bus(port, motors)
@@ -175,13 +200,13 @@ def get_motors_states(port):
 
         while True:
             try:
-                pos  = bus.sync_read("Present_Position",        normalize=False)
-                load = bus.sync_read("Present_Load",            normalize=False)
-                acc  = bus.sync_read("Maximum_Acceleration",    normalize=False)
-                volt = bus.sync_read("Present_Voltage",         normalize=False)
-                curr = bus.sync_read("Present_Current",         normalize=False)
-                offset = bus.sync_read("Homing_Offset",        normalize=False)
-                temp = bus.sync_read("Present_Temperature",     normalize=False)
+                pos = bus.sync_read("Present_Position", normalize=False)
+                acc = bus.sync_read("Maximum_Acceleration", normalize=False)
+                volt = bus.sync_read("Present_Voltage", normalize=False)
+                curr = bus.sync_read("Present_Current", normalize=False)
+                offset = bus.sync_read("Homing_Offset", normalize=False)
+                temp = bus.sync_read("Present_Temperature", normalize=False)
+                phase = bus.sync_read("Phase", normalize=False)
             except Exception as e:
                 print(f"Sync read error: {e}")
                 break
@@ -190,16 +215,15 @@ def get_motors_states(port):
             for name in motors.keys():
                 try:
                     st = {
-                        "ID":           bus.read("ID", name, normalize=False),
-                        "Model":        getattr(bus.motors.get(name), "model", None),
-                        "Position":     pos.get(name),
-                        "Load":         load.get(name),
+                        "ID": bus.read("ID", name, normalize=False),
+                        "Model": getattr(bus.motors.get(name), "model", None),
+                        "Position": pos.get(name),
                         "Acceleration": acc.get(name),
-                        "Voltage":      volt.get(name),
-                        "Current(mA)":  (curr.get(name) * 6.5) if (curr.get(name) is not None) else None,
-                        "Offset":      offset.get(name),
-                        "Temperature":  temp.get(name),
-                        "Port":         port,
+                        "Voltage": volt.get(name),
+                        "Current(mA)": (curr.get(name) * 6.5) if (curr.get(name) is not None) else None,
+                        "Offset": offset.get(name),
+                        "Temperature": temp.get(name),
+                        "Phase": phase.get(name),
                     }
                     angle = _motor_angle_from_position(st["Position"]) if st["Position"] is not None else None
                     # pos_raw = st["Position"]
@@ -211,23 +235,28 @@ def get_motors_states(port):
                 except Exception:
                     continue
 
-
-
             maxw = _term_width()
-            sep  = "-" * min(maxw, 140)  # expanded from 120 to 140
-            header = (f"{'NAME':<15} | {'ID':>3} | {'MODEL':<8} | {'POS':>6} | {'OFF':>6} | {'ANG':>6} | "
-                    f"{'LOAD':>6} | {'ACC':>6} | {'VOLT':>4} | {'CURR(MA)':>8} | {'TEMP':>4} | PORT")
+            sep = "-" * min(maxw, 140)  # expanded from 120 to 140
+            header = (
+                f"{'NAME':<15} | {'ID':>3} | {'MODEL':<8} | {'POS':>6} | {'OFF':>6} | {'ANG':>6} | "
+                f"{'ACC':>6} | {'VOLT':>4} | {'CURR(MA)':>8} | {'TEMP':>4} | {'PHASE':>5}"
+            )
             header = header[:maxw] if len(header) > maxw else header
-            frame_lines = [sep, header] + [_format_row(n, s, maxw) for (n, s) in rows] + \
-                          [sep, f"Updated: {time.strftime('%H:%M:%S')}   (Ctrl+C 退出)"]
+            frame_lines = (
+                [sep, header]
+                + [_format_row(n, s, maxw) for (n, s) in rows]
+                + [sep, f"Updated: {time.strftime('%H:%M:%S')}   (Ctrl+C 退出)"]
+            )
 
             _move_up(printed_lines)
             for ln in frame_lines:
-                _clear_line(); sys.stdout.write(ln + "\n")
+                _clear_line()
+                sys.stdout.write(ln + "\n")
 
             extra = printed_lines - len(frame_lines)
             for _ in range(max(0, extra)):
-                _clear_line(); sys.stdout.write("\n")
+                _clear_line()
+                sys.stdout.write("\n")
 
             sys.stdout.flush()
             printed_lines = len(frame_lines)
@@ -243,9 +272,7 @@ def get_motors_states(port):
             _show_cursor()
 
 
-
 def configure_motor_id(port: str, current_id: int, new_id: int):
-
     current_id = int(current_id)
     new_id = int(new_id)
     if current_id == new_id:
@@ -324,13 +351,104 @@ def configure_motor_id(port: str, current_id: int, new_id: int):
             pass
 
 
-def reset_motors_to_midpoint(port):
+def _set_phase_on_bus(bus, motor_name: str, motor_id: int, new_phase: int):
+    """Write Phase to a single named motor on an already-connected bus."""
+    try:
+        bus.write("Lock", motor_name, 0, normalize=False)
+    except Exception:
+        pass
+    try:
+        bus.disable_torque(motor_name)
+    except Exception:
+        pass
 
+    old_phase = bus.read("Phase", motor_name, normalize=False)
+    bus.write("Phase", motor_name, new_phase, normalize=False)
+    time.sleep(0.2)
+
+    readback = bus.read("Phase", motor_name, normalize=False)
+    if readback != new_phase:
+        print(f"[VERIFY FAIL] ID={motor_id} Phase readback={readback}, expected={new_phase}")
+    else:
+        print(f"[OK] ID={motor_id} Phase: {old_phase} -> {readback}")
+
+
+def configure_motor_phase(port: str, new_phase: int, motor_id: int = None):
+    """
+    Modify the Phase register.
+    - motor_id provided: change only that motor.
+    - motor_id omitted:  scan the bus and change all online motors.
+    new_phase: typically 0 or 1 (check your motor datasheet).
+    """
+    new_phase = int(new_phase)
+
+    if motor_id is not None:
+        motor_id = int(motor_id)
+
+        # Ping to confirm the motor is online.
+        probe_bus = FeetechMotorsBus(port=port, motors={})
+        try:
+            probe_bus.connect(handshake=False)
+            ok = probe_bus.ping(motor_id, num_retry=1) is not None
+        except Exception as e:
+            raise SystemExit(f"Probe connect failed: {e}")
+        finally:
+            try:
+                probe_bus.disconnect(disable_torque=False)
+            except Exception:
+                pass
+
+        if not ok:
+            raise SystemExit(f"[ABORT] ID={motor_id} not found online; abort.")
+
+        tmp_name = f"motor_{motor_id}"
+        motors = {
+            tmp_name: Motor(id=motor_id, model=DEFAULT_FEETECH_MODEL, norm_mode=MotorNormMode.RANGE_0_100)
+        }
+        bus = FeetechMotorsBus(port=port, motors=motors)
+        try:
+            bus.connect(handshake=False)
+            print(f"Connected on port {bus.port} (ID={motor_id})")
+            _set_phase_on_bus(bus, tmp_name, motor_id, new_phase)
+        except Exception as e:
+            print(f"Error during phase configuration: {e}")
+        finally:
+            try:
+                bus.disconnect(disable_torque=False)
+            except Exception:
+                pass
+
+    else:
+        # No ID specified — scan and update all online motors.
+        motors = build_motors_from_scan(port)
+        if not motors:
+            print(f"No motors found in ID range [{SCAN_START}, {SCAN_END}] on {port}.")
+            return
+
+        bus = FeetechMotorsBus(port=port, motors=motors)
+        try:
+            bus.connect(handshake=False)
+            ids_str = ", ".join(str(m.id) for m in bus.motors.values())
+            print(f"Connected on port {bus.port} — online IDs: [{ids_str}]")
+            for name, motor in motors.items():
+                try:
+                    _set_phase_on_bus(bus, name, motor.id, new_phase)
+                except Exception as e:
+                    print(f"Error on {name} (ID={motor.id}): {e}")
+        except Exception as e:
+            print(f"Error during phase configuration: {e}")
+        finally:
+            try:
+                bus.disconnect(disable_torque=False)
+            except Exception:
+                pass
+
+
+def reset_motors_to_midpoint(port):
     motors = build_motors_from_scan(port)
     if not motors:
         print(f"No motors found in ID range [{SCAN_START}, {SCAN_END}] on {port}.")
         return
-
 
     bus = build_bus(port, motors)
     if not _connect_bus(bus):
@@ -355,7 +473,6 @@ def reset_motors_to_midpoint(port):
 
 
 def reset_motors_torque(port):
-
     motors = build_motors_from_scan(port)
     if not motors:
         print(f"No motors found in ID range [{SCAN_START}, {SCAN_END}] on {port}.")
@@ -379,13 +496,11 @@ def reset_motors_torque(port):
         bus.disconnect()
 
 
-
-
 def move_motor_to_position(
     port: str,
     motor_id: int,
     position: int,
-    ):
+):
     """
     Move a motor to a raw position using numeric ID.
     - No motors{} dict or motor name needed.
@@ -430,7 +545,6 @@ def move_motor_to_position(
 
 
 def move_motors_by_code(port):
-
     motors = {
         "gripper": Motor(8, DEFAULT_FEETECH_MODEL, MotorNormMode.RANGE_0_100),
         # "wrist_roll": Motor(6, args.model, MotorNormMode.DEGREES),
@@ -440,7 +554,6 @@ def move_motors_by_code(port):
         # "shoulder_lift": Motor(2, args.model, MotorNormMode.DEGREES),
         # "shoulder_pan": Motor(1, args.model, MotorNormMode.DEGREES),
     }
-
 
     bus = build_bus(port, motors)
     if not _connect_bus(bus):
@@ -478,9 +591,7 @@ def move_motors_by_code(port):
         bus.disconnect()
 
 
-
-def move_motors_by_script(port,script_path ):
-
+def move_motors_by_script(port, script_path):
     motors = {
         "gripper": Motor(8, DEFAULT_FEETECH_MODEL, MotorNormMode.RANGE_0_100),
         # "wrist_roll": Motor(6, args.model, MotorNormMode.DEGREES),
@@ -490,7 +601,6 @@ def move_motors_by_script(port,script_path ):
         # "shoulder_lift": Motor(2, args.model, MotorNormMode.DEGREES),
         # "shoulder_pan": Motor(1, args.model, MotorNormMode.DEGREES),
     }
-        
 
     # Resolve script path relative to this file for convenience
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -583,11 +693,6 @@ def move_motors_by_script(port,script_path ):
     print(f"Completed executing actions from {script_path}")
 
 
-
-
-
-
-
 # --------------------------- CLI --------------------------- #
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Motor utilities (LeRobot latest API)")
@@ -597,6 +702,7 @@ if __name__ == "__main__":
         choices=[
             "get_motors_states",
             "configure_motor_id",
+            "configure_motor_phase",
             "reset_motors_to_midpoint",
             "reset_motors_torque",
             "move_motor_to_position",
@@ -606,12 +712,17 @@ if __name__ == "__main__":
         help="Command to execute",
     )
 
-    parser.add_argument("--port", type=str, default=DEFAULT_PORT, help=f"Set the port (default: {DEFAULT_PORT})")
-    parser.add_argument("--id", type=str, help="Motor name or CURRENT numeric ID (context depends on subcommand)")
+    parser.add_argument(
+        "--port", type=str, default=DEFAULT_PORT, help=f"Set the port (default: {DEFAULT_PORT})"
+    )
+    parser.add_argument(
+        "--id", type=str, help="Motor name or CURRENT numeric ID (context depends on subcommand)"
+    )
     parser.add_argument("--set_id", type=int, help="Desired numeric ID value to set on the motor")
+    parser.add_argument("--set_phase", type=int, help="Desired Phase value to set on the motor")
     parser.add_argument("--position", type=str, help="Goal position (raw ticks) for move_motor_to_position")
     parser.add_argument("--script_path", type=str, help="Relative path to CSV-like action script")
-    #parser.add_argument("--file", type=str, help="Path to calibration JSON file")
+    # parser.add_argument("--file", type=str, help="Path to calibration JSON file")
 
     args = parser.parse_args()
     cmd = args.command
@@ -619,29 +730,34 @@ if __name__ == "__main__":
     # ---- helpers for dispatch ----
 
     commands = {
-        "get_motors_states":             lambda: get_motors_states(args.port),
-
-        "configure_motor_id":            lambda: (
+        "get_motors_states": lambda: get_motors_states(args.port),
+        "configure_motor_id": lambda: (
             configure_motor_id(args.port, int(args.id), int(args.set_id))
             if (args.id is not None and args.set_id is not None)
             else (_ for _ in ()).throw(SystemExit("--id (current numeric ID) and --set_id are required"))
         ),
-
-        "reset_motors_to_midpoint":      lambda: reset_motors_to_midpoint(args.port),
-        "reset_motors_torque":           lambda: reset_motors_torque(args.port),
-        "move_motor_to_position":        lambda: (
-            move_motor_to_position(args.port,  args.id, args.position)
-            if (args.id is not None and args.position is not None)
-            else (_ for _ in ()).throw(SystemExit("--id (motor name or numeric ID) and --position are required"))
+        "configure_motor_phase": lambda: (
+            configure_motor_phase(
+                args.port, int(args.set_phase), int(args.id) if args.id is not None else None
+            )
+            if args.set_phase is not None
+            else (_ for _ in ()).throw(SystemExit("--set_phase is required"))
         ),
-        "move_motors_by_code":           lambda: move_motors_by_code(args.port),
-        "move_motors_by_script":         lambda: (
-            move_motors_by_script(args.port,args.script_path )
+        "reset_motors_to_midpoint": lambda: reset_motors_to_midpoint(args.port),
+        "reset_motors_torque": lambda: reset_motors_torque(args.port),
+        "move_motor_to_position": lambda: (
+            move_motor_to_position(args.port, args.id, args.position)
+            if (args.id is not None and args.position is not None)
+            else (_ for _ in ()).throw(
+                SystemExit("--id (motor name or numeric ID) and --position are required")
+            )
+        ),
+        "move_motors_by_code": lambda: move_motors_by_code(args.port),
+        "move_motors_by_script": lambda: (
+            move_motors_by_script(args.port, args.script_path)
             if args.script_path
             else (_ for _ in ()).throw(SystemExit("--script_path is required for move_motors_by_script"))
         ),
-
-
     }
 
     # ---- execute ----
