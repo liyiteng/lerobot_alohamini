@@ -535,8 +535,8 @@ class LeKiwi(Robot):
         
         theta = theta_rad * (180.0 / np.pi)
         return {
-            "x.vel": x,
-            "y.vel": y,
+            "x.vel": -x,
+            "y.vel": -y,
             "theta.vel": theta,
         }  # m/s and deg/s
     
