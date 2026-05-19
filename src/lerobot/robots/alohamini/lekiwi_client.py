@@ -314,7 +314,8 @@ class LeKiwiClient(Robot):
         for cam_name, frame in frames.items():
             if frame is None:
                 logging.warning("Frame is None")
-                frame = np.zeros((640, 480, 3), dtype=np.uint8)
+                height, width, channels = self._cameras_ft[cam_name]
+                frame = np.zeros((height, width, channels), dtype=np.uint8)
             obs_dict[cam_name] = frame
 
 
