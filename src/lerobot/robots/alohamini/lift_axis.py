@@ -30,7 +30,7 @@ class LiftAxisConfig:
 
     # Homing (drive downward to hard stop → rebound slightly)
     home_down_speed: int = 1300      # Downward target velocity in velocity mode
-    home_stall_current_ma: int = 150  # Stall current threshold; used when no current feedback
+    home_stall_current_ma: int = 300  # Stall current threshold; used when no current feedback
     home_backoff_deg: float = 5.0
 
     # Velocity closed-loop gains
