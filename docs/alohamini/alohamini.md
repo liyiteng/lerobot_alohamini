@@ -94,6 +94,7 @@ SO-ARM leader (5-DoF):
 ```bash
 python examples/alohamini/teleoperate_bi.py \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini1 \
   --leader_id so101_leader_bi \
   --arm_profile so-arm-5dof
 ```
@@ -103,6 +104,7 @@ AM-ARM leader (6-DoF):
 ```bash
 python examples/alohamini/teleoperate_bi.py \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini2 \
   --leader_id am_leader_bi \
   --arm_profile am-leader-6dof
 ```
@@ -123,10 +125,10 @@ python -m lerobot.robots.alohamini.lekiwi_host --robot_model alohamini2pro
 
 # PC — run the client for your leader arm:
 python examples/alohamini/teleoperate_bi.py \
-  --remote_ip <Pi_IP> --leader_id so101_leader_bi --arm_profile so-arm-5dof
+  --remote_ip <Pi_IP> --robot_model alohamini1 --leader_id so101_leader_bi --arm_profile so-arm-5dof
 
 python examples/alohamini/teleoperate_bi.py \
-  --remote_ip <Pi_IP> --leader_id am_leader_bi --arm_profile am-leader-6dof
+  --remote_ip <Pi_IP> --robot_model alohamini2 --leader_id am_leader_bi --arm_profile am-leader-6dof
 ```
 
 ---
@@ -135,6 +137,7 @@ python examples/alohamini/teleoperate_bi.py \
 
 > Make sure the Pi host is already running (§5) before recording.  
 > `--arm_profile` here refers to your **leader arm** hardware, not the follower robot.  
+> `--robot_model` must match the model running on the Pi host.  
 > Replace `<Pi_IP>` with your Raspberry Pi's IP address.
 
 ### AlohaMini 1 — SO-ARM leader (5-DoF)
@@ -150,6 +153,7 @@ python examples/alohamini/record_bi.py \
   --reset_time 8 \
   --task_description "pickup1" \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini1 \
   --leader_id so101_leader_bi \
   --arm_profile so-arm-5dof
 ```
@@ -165,6 +169,7 @@ python examples/alohamini/record_bi.py \
   --reset_time 8 \
   --task_description "pickup1" \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini1 \
   --leader_id so101_leader_bi \
   --arm_profile so-arm-5dof \
   --resume
@@ -183,6 +188,7 @@ python examples/alohamini/record_bi.py \
   --reset_time 8 \
   --task_description "pickup1" \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini2 \
   --leader_id am_leader_bi \
   --arm_profile am-leader-6dof
 ```
@@ -198,6 +204,7 @@ python examples/alohamini/record_bi.py \
   --reset_time 8 \
   --task_description "pickup1" \
   --remote_ip <Pi_IP> \
+  --robot_model alohamini2 \
   --leader_id am_leader_bi \
   --arm_profile am-leader-6dof \
   --resume
@@ -211,7 +218,8 @@ python examples/alohamini/record_bi.py \
 python examples/alohamini/replay_bi.py \
   --dataset $HF_USER/am2_bi_test \
   --episode 0 \
-  --remote_ip <Pi_IP>
+  --remote_ip <Pi_IP> \
+  --robot_model alohamini2
 ```
 
 ---
@@ -256,7 +264,7 @@ Make sure the Pi host is already running (§5), then run inference from the PC.
 > `--robot_model` / `--robot.robot_model` must match the model running on the Pi host:  
 > `alohamini1` (SO-ARM 5-DoF, 16-dim state) · `alohamini2` / `alohamini2pro` (AM-ARM 6-DoF, 18-dim state)
 
-### Option A — `evaluate_bi.py` (custom script, N episodes, records to Hub)
+### `evaluate_bi.py` (custom script, N episodes, records to Hub)
 
 ```bash
 python examples/alohamini/evaluate_bi.py \
@@ -269,38 +277,6 @@ python examples/alohamini/evaluate_bi.py \
   --remote_ip <Pi_IP> \
   --robot_id my_alohamini \
   --robot_model alohamini2
-```
-
-### Option B — `lerobot-rollout` (official CLI)
-
-Pure inference, no recording:
-
-```bash
-python -m lerobot.scripts.lerobot_rollout \
-  --strategy.type=base \
-  --robot.type=alohamini_client \
-  --robot.remote_ip=<Pi_IP> \
-  --robot.robot_model=alohamini2 \
-  --policy.path=outputs/train/act_your_dataset1/checkpoints/020000/pretrained_model \
-  --task="Pick and place task" \
-  --fps=20 \
-  --duration=45 \
-  --display_data=true
-```
-
-Inference + record eval dataset (dataset name must start with `rollout_`):
-
-```bash
-python -m lerobot.scripts.lerobot_rollout \
-  --strategy.type=sentry \
-  --robot.type=alohamini_client \
-  --robot.remote_ip=<Pi_IP> \
-  --robot.robot_model=alohamini2 \
-  --policy.path=outputs/train/act_your_dataset1/checkpoints/020000/pretrained_model \
-  --dataset.repo_id=$HF_USER/rollout_eval1 \
-  --task="Pick and place task" \
-  --fps=20 \
-  --display_data=true
 ```
 
 ---
