@@ -14,13 +14,17 @@ parser.add_argument("--episode", type=int, default=0,
                     help="Episode index to replay (default 0)")
 parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
 parser.add_argument("--robot_id", type=str, default="lekiwi", help="Robot ID")
+parser.add_argument("--robot_model", type=str, default="alohamini1",
+                    choices=["alohamini1", "alohamini2", "alohamini2pro"],
+                    help="AlohaMini model. Must match the --robot_model used on the Pi host side.")
 
 
 
 args = parser.parse_args()
 
 
-robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
+robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
+                                  robot_model=args.robot_model)
 robot = LeKiwiClient(robot_config)
 
 

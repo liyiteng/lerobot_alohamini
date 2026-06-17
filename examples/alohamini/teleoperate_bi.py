@@ -16,6 +16,13 @@ parser.add_argument("--no_robot", action="store_true", help="Do not connect robo
 parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
 parser.add_argument("--fps", type=int, default=30, help="Main loop frequency (frames per second)")
 parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="LeKiwi host IP address")
+parser.add_argument(
+    "--robot_model",
+    type=str,
+    default="alohamini1",
+    choices=["alohamini1", "alohamini2", "alohamini2pro"],
+    help="AlohaMini model. Must match the --robot_model used on the Pi host side.",
+)
 parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
 parser.add_argument(
     "--arm_profile",
@@ -38,7 +45,11 @@ if NO_ROBOT:
 if NO_LEADER:
     print("🧪 NO_LEADER mode enabled: leader arm will not connect, only print actions.")
 # Create configs
-robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id="my_alohamini")
+robot_config = LeKiwiClientConfig(
+    remote_ip=args.remote_ip,
+    id="my_alohamini",
+    robot_model=args.robot_model,
+)
 bi_cfg = BiSOLeaderConfig(
     left_arm_config=SOLeaderConfig(
         port="/dev/am_arm_leader_left",

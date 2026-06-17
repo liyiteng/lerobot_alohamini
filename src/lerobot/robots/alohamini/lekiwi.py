@@ -37,6 +37,7 @@ from lerobot.motors.feetech import (
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
 from .config_lekiwi import LeKiwiConfig
+from .model_specs import arm_state_keys_for_robot_model, validate_robot_model
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ _ARM_PROFILES: dict[str, tuple[tuple[str, int, str, MotorNormMode | None], ...]]
         ("gripper", 7, "sts3215", MotorNormMode.RANGE_0_100),
     ),
     "am-follower-6dof": (
-        ("shoulder_pan", 1, "sts3215", None),
+        ("shoulder_pan", 1, "sts3095", None),
         ("shoulder_lift", 2, "sts3095", None),
         ("elbow_flex", 3, "sts3095", None),
         ("wrist_flex", 4, "sts3215", None),
@@ -98,39 +99,6 @@ def _make_arm_motors(
     }
 
 
-def _arm_state_keys(prefix: str, arm_profile: str) -> tuple[str, ...]:
-    if arm_profile not in _ARM_PROFILES:
-        raise ValueError(
-            f"Unknown arm_profile '{arm_profile}'. Expected one of: {list(_ARM_PROFILES.keys())}."
-        )
-
-    return tuple(f"{prefix}_{joint}.pos" for joint, _, _, _ in _ARM_PROFILES[arm_profile])
-
-
-# Per-model hardware specifications. `robot_model` is the customer-facing whole-robot SKU;
-# `arm_profile` selects the follower arm hardware mounted on that robot.
-_ROBOT_SPECS: dict[str, dict] = {
-    "alohamini1": {
-        "arm_profile": "so-arm-5dof",
-        "base_motor": "sts3215",
-        "lift_motor": "sts3215",
-        "lead_mm_per_rev": 84.0,
-    },
-    "alohamini2": {
-        "arm_profile": "am-follower-6dof",
-        "base_motor": "sts3215",
-        "lift_motor": "sts3095",
-        "lead_mm_per_rev": 131.0,
-    },
-    "alohamini2pro": {
-        "arm_profile": "am-follower-6dof-hd",
-        "base_motor": "sts3250",
-        "lift_motor": "sts3095",
-        "lead_mm_per_rev": 131.0,
-    },
-}
-
-
 class LeKiwi(Robot):
     """
     The robot includes a three omniwheel mobile base and a remote follower arm.
@@ -147,20 +115,16 @@ class LeKiwi(Robot):
         self.config = config
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
 
-        if config.robot_model not in _ROBOT_SPECS:
-            raise ValueError(
-                f"Unknown robot_model '{config.robot_model}'. "
-                f"Expected one of: {list(_ROBOT_SPECS.keys())}."
-            )
-        specs = _ROBOT_SPECS[config.robot_model]
+        specs = validate_robot_model(config.robot_model)
         arm_profile = specs["arm_profile"]
         bm = specs["base_motor"]
         lm = specs["lift_motor"]
 
         left_arm_motors_cfg = _make_arm_motors("arm_left", arm_profile, norm_mode_body)
         right_arm_motors_cfg = _make_arm_motors("arm_right", arm_profile, norm_mode_body)
-        self._left_arm_state_keys = _arm_state_keys("arm_left", arm_profile)
-        self._right_arm_state_keys = _arm_state_keys("arm_right", arm_profile)
+        self._left_arm_state_keys, self._right_arm_state_keys = arm_state_keys_for_robot_model(
+            config.robot_model
+        )
 
         self.left_bus = FeetechMotorsBus(
             port=self.config.left_port,

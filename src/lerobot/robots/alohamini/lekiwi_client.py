@@ -32,6 +32,7 @@ from lerobot.utils.errors import DeviceNotConnectedError
 
 from ..robot import Robot
 from .config_lekiwi import LeKiwiClientConfig
+from .model_specs import arm_state_keys_for_robot_model
 from .lift_axis import LiftAxisConfig
 
 logging.basicConfig(
@@ -81,44 +82,10 @@ class LeKiwiClient(Robot):
         self._is_connected = False
         self.logs = {}
 
-        # Arm state keys depend on DOF, which is determined by robot_model.
-        _6DOF_MODELS = {"alohamini2", "alohamini2pro"}
-        if config.robot_model in _6DOF_MODELS:
-            self._left_arm_state_keys = (
-                "arm_left_shoulder_pan.pos",
-                "arm_left_shoulder_lift.pos",
-                "arm_left_elbow_flex.pos",
-                "arm_left_wrist_flex.pos",
-                "arm_left_wrist_yaw.pos",
-                "arm_left_wrist_roll.pos",
-                "arm_left_gripper.pos",
-            )
-            self._right_arm_state_keys = (
-                "arm_right_shoulder_pan.pos",
-                "arm_right_shoulder_lift.pos",
-                "arm_right_elbow_flex.pos",
-                "arm_right_wrist_flex.pos",
-                "arm_right_wrist_yaw.pos",
-                "arm_right_wrist_roll.pos",
-                "arm_right_gripper.pos",
-            )
-        else:  # alohamini1 / so-arm-5dof
-            self._left_arm_state_keys = (
-                "arm_left_shoulder_pan.pos",
-                "arm_left_shoulder_lift.pos",
-                "arm_left_elbow_flex.pos",
-                "arm_left_wrist_flex.pos",
-                "arm_left_wrist_roll.pos",
-                "arm_left_gripper.pos",
-            )
-            self._right_arm_state_keys = (
-                "arm_right_shoulder_pan.pos",
-                "arm_right_shoulder_lift.pos",
-                "arm_right_elbow_flex.pos",
-                "arm_right_wrist_flex.pos",
-                "arm_right_wrist_roll.pos",
-                "arm_right_gripper.pos",
-            )
+        # Must match the host-side robot_model so observation/action schemas stay aligned.
+        self._left_arm_state_keys, self._right_arm_state_keys = arm_state_keys_for_robot_model(
+            config.robot_model
+        )
 
     @property
     def _state_ft(self) -> dict[str, type]:

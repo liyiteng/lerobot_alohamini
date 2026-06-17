@@ -30,6 +30,13 @@ def main():
     parser.add_argument("--task_description", type=str, default="My task description4", help="Task description")
     parser.add_argument("--remote_ip", type=str, default="127.0.0.1", help="Robot host IP")
     parser.add_argument("--robot_id", type=str, default="lekiwi_host", help="Robot ID")
+    parser.add_argument(
+        "--robot_model",
+        type=str,
+        default="alohamini1",
+        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        help="AlohaMini model. Must match the --robot_model used on the Pi host side.",
+    )
     parser.add_argument("--leader_id", type=str, default="so101_leader_bi", help="Leader arm device ID")
     parser.add_argument(
         "--arm_profile",
@@ -43,7 +50,11 @@ def main():
     args = parser.parse_args()
 
     # === Robot and teleop config ===
-    robot_config = LeKiwiClientConfig(remote_ip=args.remote_ip, id=args.robot_id)
+    robot_config = LeKiwiClientConfig(
+        remote_ip=args.remote_ip,
+        id=args.robot_id,
+        robot_model=args.robot_model,
+    )
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
             port="/dev/am_arm_leader_left",

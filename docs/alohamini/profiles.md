@@ -2,6 +2,9 @@
 
 The `--arm_profile` and `--robot_model` flags select your hardware variant.
 
+Use `--robot_model` consistently on both the Pi host and PC client scripts. Use `--arm_profile`
+only for the leader arm connected to the PC.
+
 ## AlohaMini host-side (`--robot_model`)
 
 | `--robot_model` | Follower arm | Base wheels | Lift motor | Lead screw |
