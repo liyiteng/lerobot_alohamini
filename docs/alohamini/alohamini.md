@@ -139,6 +139,7 @@ python examples/alohamini/teleoperate_bi.py \
 > `--arm_profile` here refers to your **leader arm** hardware, not the follower robot.  
 > `--robot_model` must match the model running on the Pi host.  
 > Replace `<Pi_IP>` with your Raspberry Pi's IP address.
+> `record_bi.py` prints the local dataset path and uploads to Hugging Face Hub by default. Add `--push_to_hub false` to keep the dataset local only.
 
 ### AlohaMini 1 — SO-ARM leader (5-DoF)
 

@@ -213,6 +213,9 @@ python examples/alohamini/teleoperate_bi.py \
 
 ## Recording
 
+`record_bi.py` prints the local dataset path after setup and finalization, and uploads to Hugging Face Hub by default.
+Add `--push_to_hub false` if you only want to keep the dataset locally.
+
 Create a dataset for AlohaMini 1:
 
 ```bash

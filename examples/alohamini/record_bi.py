@@ -19,6 +19,19 @@ from lerobot.utils.visualization_utils import init_rerun
 from datetime import datetime
 import argparse
 
+
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    value = value.lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise argparse.ArgumentTypeError("Expected true or false.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
     parser.add_argument("--dataset", type=str, required=True,
@@ -46,6 +59,14 @@ def main():
         help="Leader arm profile selector.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
+    parser.add_argument(
+        "--push_to_hub",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Whether to upload the dataset to Hugging Face Hub after recording. Use '--push_to_hub false' to skip upload.",
+    )
 
     args = parser.parse_args()
 
@@ -96,6 +117,8 @@ def main():
             image_writer_threads=4,
         )
         print(f"Dataset created with id: {dataset.repo_id}")
+
+    print(f"Local dataset path: {dataset.root.resolve()}")
 
     # === Connect devices ===
     robot.connect()
@@ -164,7 +187,13 @@ def main():
     keyboard.disconnect()
     listener.stop()
     dataset.finalize()
-    dataset.push_to_hub()
+    print(f"Dataset saved locally at: {dataset.root.resolve()}")
+    if args.push_to_hub:
+        print(f"Uploading dataset to Hugging Face Hub: {dataset.repo_id}")
+        dataset.push_to_hub()
+        print(f"Dataset uploaded to: https://huggingface.co/datasets/{dataset.repo_id}")
+    else:
+        print("Skipping Hugging Face upload because --push_to_hub is false.")
 
 
 if __name__ == "__main__":
