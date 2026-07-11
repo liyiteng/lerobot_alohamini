@@ -127,10 +127,16 @@ python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2pro
 
 # PC — run the client for your leader arm:
 python examples/alohamini/teleoperate_bi.py \
-  --robot.remote_ip <Pi_IP> --robot.robot_model alohamini1 --teleop.id so101_leader_bi --teleop.arm_profile so-arm-5dof
+  --robot.remote_ip <Pi_IP> \
+  --robot.robot_model alohamini1 \
+  --teleop.id so101_leader_bi \
+  --teleop.arm_profile so-arm-5dof
 
 python examples/alohamini/teleoperate_bi.py \
-  --robot.remote_ip <Pi_IP> --robot.robot_model alohamini2 --teleop.id am_leader_bi --teleop.arm_profile am-leader-6dof
+  --robot.remote_ip <Pi_IP> \
+  --robot.robot_model alohamini2 \
+  --teleop.id am_leader_bi \
+  --teleop.arm_profile am-leader-6dof
 ```
 
 ---
