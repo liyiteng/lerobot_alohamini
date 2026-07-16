@@ -33,10 +33,12 @@ class AlohaMiniHost:
         self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
         self.zmq_cmd_socket.bind(f"tcp://*:{config.port_zmq_cmd}")
 
-        self.zmq_observation_socket = self.zmq_context.socket(zmq.PUSH)
-        # CONFLATE does not work reliably with multipart messages. Keep the queue tiny and let
-        # the client drain to the newest complete observation instead.
+        # Observations are request-driven: the client asks for a frame and the host
+        # replies with the current one. This prevents frames from accumulating while
+        # the client is busy encoding/saving a dataset episode.
+        self.zmq_observation_socket = self.zmq_context.socket(zmq.ROUTER)
         self.zmq_observation_socket.setsockopt(zmq.SNDHWM, 1)
+        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
         self.zmq_observation_socket.bind(f"tcp://*:{config.port_zmq_observations}")
 
         self.connection_time_s = config.connection_time_s
@@ -161,13 +163,27 @@ def main():
             
             last_observation = robot.get_observation()
 
-            observation_parts = build_observation_multipart(last_observation, robot.cameras.keys())
-
-            # Send the observation to the remote agent
+            # Drain duplicate requests and answer only the latest one. Since the
+            # response is built after receiving the request, it cannot come from a
+            # queue accumulated while the client was saving.
+            request_identity = None
+            request_token = None
             try:
-                host.zmq_observation_socket.send_multipart(observation_parts, flags=zmq.NOBLOCK)
+                while True:
+                    request_parts = host.zmq_observation_socket.recv_multipart(flags=zmq.NOBLOCK)
+                    request_identity = request_parts[0]
+                    request_token = request_parts[-1]
             except zmq.Again:
-                logging.info("Dropping observation, no client connected")
+                pass
+
+            if request_identity is not None and request_token is not None:
+                observation_parts = build_observation_multipart(last_observation, robot.cameras.keys())
+                try:
+                    host.zmq_observation_socket.send_multipart(
+                        [request_identity, request_token, *observation_parts], flags=zmq.NOBLOCK
+                    )
+                except zmq.Again:
+                    logging.info("Dropping observation response, client is not ready")
 
             # Ensure a short sleep to avoid overloading the CPU.
             elapsed = time.time() - loop_start_time

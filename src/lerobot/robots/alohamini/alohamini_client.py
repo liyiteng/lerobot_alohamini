@@ -18,6 +18,7 @@ import base64
 import inspect
 import json
 import logging
+import time
 from functools import cached_property
 import os
 from typing import Any
@@ -65,10 +66,15 @@ class AlohaMiniClient(Robot):
         self.zmq_context = None
         self.zmq_cmd_socket = None
         self.zmq_observation_socket = None
+        self._pending_observation_message = None
+        self._observation_request_id = 0
 
         self.last_frames = {}
 
         self.last_remote_state = {}
+        # Incremented only when a new observation message is successfully decoded.
+        # Callers can use this to distinguish a fresh remote frame from ``last_frames`` fallback.
+        self._observation_sequence = 0
         self._lift_target_mm = None
 
         # Define three speed levels and a current index
@@ -122,6 +128,11 @@ class AlohaMiniClient(Robot):
         return self._is_connected
 
     @property
+    def observation_sequence(self) -> int:
+        """Number of successfully received remote observations."""
+        return self._observation_sequence
+
+    @property
     def is_calibrated(self) -> bool:
         pass
 
@@ -132,21 +143,21 @@ class AlohaMiniClient(Robot):
         zmq = self._zmq
         self.zmq_context = zmq.Context()
         self.zmq_cmd_socket = self.zmq_context.socket(zmq.PUSH)
+        # Socket options that control queueing must be set before connect().
+        self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
         zmq_cmd_locator = f"tcp://{self.remote_ip}:{self.port_zmq_cmd}"
         self.zmq_cmd_socket.connect(zmq_cmd_locator)
-        self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
 
-        self.zmq_observation_socket = self.zmq_context.socket(zmq.PULL)
+        # Request-driven observation transport: no observations are produced while
+        # this client is saving, so stale reset frames cannot accumulate in transit.
+        self.zmq_observation_socket = self.zmq_context.socket(zmq.DEALER)
+        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
+        self.zmq_observation_socket.setsockopt(zmq.SNDHWM, 1)
         zmq_observations_locator = f"tcp://{self.remote_ip}:{self.port_zmq_observations}"
         self.zmq_observation_socket.connect(zmq_observations_locator)
-        # Multipart messages cannot use CONFLATE safely. Keep the queue tiny and drain it to the
-        # newest complete observation in _poll_and_get_latest_message().
-        self.zmq_observation_socket.setsockopt(zmq.RCVHWM, 1)
 
-        poller = zmq.Poller()
-        poller.register(self.zmq_observation_socket, zmq.POLLIN)
-        socks = dict(poller.poll(self.connect_timeout_s * 1000))
-        if self.zmq_observation_socket not in socks or socks[self.zmq_observation_socket] != zmq.POLLIN:
+        self._pending_observation_message = self._request_observation(self.connect_timeout_s * 1000)
+        if self._pending_observation_message is None:
             raise DeviceNotConnectedError("Timeout waiting for AlohaMini Host to connect expired.")
 
         self._is_connected = True
@@ -154,34 +165,54 @@ class AlohaMiniClient(Robot):
     def calibrate(self) -> None:
         pass
 
-    def _poll_and_get_latest_message(self) -> list[bytes] | None:
-        """Polls the ZMQ socket for a limited time and returns the latest multipart message."""
+    def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
+        """Request one observation and ignore responses to older timed-out requests."""
         zmq = self._zmq
-        poller = zmq.Poller()
-        poller.register(self.zmq_observation_socket, zmq.POLLIN)
+        self._observation_request_id += 1
+        request_token = str(self._observation_request_id).encode("ascii")
 
         try:
-            socks = dict(poller.poll(self.polling_timeout_ms))
+            self.zmq_observation_socket.send(request_token, flags=zmq.NOBLOCK)
         except zmq.ZMQError as e:
-            logging.error(f"ZMQ polling error: {e}")
+            logging.error(f"ZMQ observation request failed: {e}")
             return None
 
-        if self.zmq_observation_socket not in socks:
-            logging.info("No new data available within timeout.")
-            return None
+        poller = zmq.Poller()
+        poller.register(self.zmq_observation_socket, zmq.POLLIN)
+        deadline = time.monotonic() + timeout_ms / 1000
 
-        last_msg = None
         while True:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms == 0:
+                return None
             try:
-                msg = self.zmq_observation_socket.recv_multipart(zmq.NOBLOCK)
-                last_msg = msg
-            except zmq.Again:
-                break
+                socks = dict(poller.poll(remaining_ms))
+            except zmq.ZMQError as e:
+                logging.error(f"ZMQ observation poll failed: {e}")
+                return None
+            if self.zmq_observation_socket not in socks:
+                return None
 
-        if last_msg is None:
-            logging.info("Poller indicated data, but failed to retrieve message.")
+            while True:
+                try:
+                    response = self.zmq_observation_socket.recv_multipart(zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                if response and response[0] == request_token:
+                    return response[1:]
 
-        return last_msg
+    def _poll_and_get_latest_message(self) -> list[bytes] | None:
+        """Requests and returns the newest observation available from the host."""
+
+        if self._pending_observation_message is not None:
+            message = self._pending_observation_message
+            self._pending_observation_message = None
+            return message
+
+        message = self._request_observation(self.polling_timeout_ms)
+        if message is None:
+            logging.info("No new data available within timeout.")
+        return message
 
     def _parse_observation_json(self, obs_data: str | bytes) -> RobotObservation | None:
         """Parses the JSON observation metadata."""
@@ -303,6 +334,7 @@ class AlohaMiniClient(Robot):
 
         self.last_frames = {**self.last_frames, **new_frames}
         self.last_remote_state = new_state
+        self._observation_sequence += 1
 
         return self.last_frames, new_state
 

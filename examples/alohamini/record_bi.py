@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
+import logging
+import math
+import os
+import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -14,7 +22,33 @@ from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STR
 from lerobot.utils.feature_utils import hw_to_dataset_features
 from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.utils import init_logging, log_say
-from lerobot.utils.visualization_utils import init_rerun
+
+
+@contextmanager
+def native_stderr_as_debug():
+    """Capture native encoder stderr and route it to DEBUG logging."""
+    try:
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, OSError):
+        yield
+        return
+
+    sys.stderr.flush()
+    saved_stderr_fd = os.dup(stderr_fd)
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as captured_stderr:
+            os.dup2(captured_stderr.fileno(), stderr_fd)
+            try:
+                yield
+            finally:
+                sys.stderr.flush()
+                os.dup2(saved_stderr_fd, stderr_fd)
+                captured_stderr.seek(0)
+                native_output = captured_stderr.read().decode(errors="replace").strip()
+                if native_output:
+                    logging.debug("Native video encoder output:\n%s", native_output)
+    finally:
+        os.close(saved_stderr_fd)
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -30,7 +64,8 @@ def parse_bool(value: str | bool) -> bool:
 
 
 def main():
-    init_logging()
+    # Keep the interactive output focused on recording state. Errors are still shown.
+    init_logging(console_level="ERROR")
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
     parser.add_argument("--dataset.repo_id", "--dataset", dest="dataset_repo_id", type=str, required=True,
                     help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
@@ -126,7 +161,6 @@ def main():
     dataset_root = Path(args.dataset_root) if args.dataset_root else HF_LEROBOT_HOME / args.dataset_repo_id
 
     if args.resume:
-        print("Resuming existing dataset:", args.dataset_repo_id)
         dataset = LeRobotDataset.resume(
             repo_id=args.dataset_repo_id,
             root=dataset_root,
@@ -142,9 +176,6 @@ def main():
             use_videos=True,
             image_writer_threads=4,
         )
-        print(f"Dataset created with id: {dataset.repo_id}")
-
-    print(f"Local dataset path: {dataset.root.resolve()}")
 
     # === Connect devices ===
     robot.connect()
@@ -152,80 +183,181 @@ def main():
     keyboard.connect()
 
     listener, events = init_keyboard_listener()
-    init_rerun(session_name="alohamini_record")
 
     if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
         raise ValueError("Robot or teleop is not connected!")
-
-    print("Starting record loop...")
     recorded_episodes = 0
 
-    def reset_environment() -> None:
+    def print_countdown(
+        phase: str,
+        episode_number: int,
+        remaining_s: int,
+        *,
+        is_recording: bool,
+    ) -> None:
+        """Render every countdown with the same one-line layout."""
+        recording_state = "RECORDING" if is_recording else "NOT RECORDING"
+        # Keep this deliberately short: a wrapped terminal row cannot be reliably
+        # rewritten with carriage return and would make every tick appear as a new line.
+        message = f"[{phase:<7}] Ep {episode_number:<3} | {remaining_s:>4}s | {recording_state}"
+        # Clear and rewrite one terminal row so per-second updates do not scroll the screen.
+        sys.stdout.write(f"\r\033[2K{message}")
+        sys.stdout.flush()
+
+    def reset_environment(episode_number: int) -> None:
         """Reset the scene while continuously draining remote observations."""
-        log_say("Reset the environment")
-        record_loop(
-            robot=robot,
-            events=events,
-            fps=args.fps,
-            teleop=[leader_arm, keyboard],
-            control_time_s=args.reset_time,
-            single_task=args.task_description,
-            display_data=True,
-            teleop_action_processor=teleop_action_processor,
-            robot_action_processor=robot_action_processor,
-            robot_observation_processor=robot_observation_processor,
-        )
+        countdown_stopped = threading.Event()
+
+        def show_countdown() -> None:
+            deadline = time.monotonic() + args.reset_time
+            last_remaining = None
+            while not countdown_stopped.is_set():
+                remaining = max(0, math.ceil(deadline - time.monotonic()))
+                if remaining != last_remaining:
+                    print_countdown(
+                        "RESET",
+                        episode_number,
+                        remaining,
+                        is_recording=False,
+                    )
+                    last_remaining = remaining
+                if remaining == 0:
+                    break
+                countdown_stopped.wait(0.1)
+
+        countdown_thread = threading.Thread(target=show_countdown, daemon=True)
+        countdown_thread.start()
+        try:
+            record_loop(
+                robot=robot,
+                events=events,
+                fps=args.fps,
+                teleop=[leader_arm, keyboard],
+                control_time_s=args.reset_time,
+                single_task=args.task_description,
+                display_data=False,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+            )
+        finally:
+            countdown_stopped.set()
+            countdown_thread.join()
+            print(flush=True)
+
+    def wait_for_fresh_observation(episode_number: int) -> None:
+        """Do not start an episode with an observation cached during reset or save."""
+        previous_sequence = robot.observation_sequence
+        deadline = time.monotonic() + robot.config.connect_timeout_s
+        while robot.observation_sequence == previous_sequence:
+            robot.get_observation()
+            if robot.observation_sequence == previous_sequence and time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Episode {episode_number} did not receive a fresh observation before recording. "
+                    "Recording was stopped to avoid saving cached reset frames."
+                )
+
+    def record_episode(episode_number: int) -> None:
+        """Record one episode while displaying its remaining time."""
+        countdown_stopped = threading.Event()
+
+        def show_countdown() -> None:
+            deadline = time.monotonic() + args.episode_time
+            last_remaining = None
+            while not countdown_stopped.is_set():
+                remaining = max(0, math.ceil(deadline - time.monotonic()))
+                if remaining != last_remaining:
+                    print_countdown(
+                        "RECORD",
+                        episode_number,
+                        remaining,
+                        is_recording=True,
+                    )
+                    last_remaining = remaining
+                if remaining == 0:
+                    break
+                countdown_stopped.wait(0.1)
+
+        countdown_thread = threading.Thread(target=show_countdown, daemon=True)
+        countdown_thread.start()
+        try:
+            record_loop(
+                robot=robot,
+                events=events,
+                fps=args.fps,
+                dataset=dataset,
+                teleop=[leader_arm, keyboard],
+                control_time_s=args.episode_time,
+                single_task=args.task_description,
+                display_data=False,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+            )
+        finally:
+            countdown_stopped.set()
+            countdown_thread.join()
+            print(flush=True)
 
     while recorded_episodes < args.num_episodes and not events["stop_recording"]:
-        log_say(f"Recording episode {recorded_episodes + 1} of {args.num_episodes}")
-
-        # === Main record loop ===
-        record_loop(
-            robot=robot,
-            events=events,
-            fps=args.fps,
-            dataset=dataset,
-            teleop=[leader_arm, keyboard],
-            control_time_s=args.episode_time,
-            single_task=args.task_description,
-            display_data=True,
-            teleop_action_processor=teleop_action_processor,
-            robot_action_processor=robot_action_processor,
-            robot_observation_processor=robot_observation_processor,
+        episode_number = dataset.num_episodes + 1
+        remaining_episodes = args.num_episodes - recorded_episodes
+        wait_for_fresh_observation(episode_number)
+        if events["stop_recording"]:
+            break
+        log_say(f"Recording episode {episode_number}")
+        print(
+            f"Episode {episode_number} recording started. "
+            f"{remaining_episodes} episode(s) remaining. Press -> to end recording; "
+            "press R to discard and re-record.",
+            flush=True,
         )
 
+        # === Main record loop ===
+        record_episode(episode_number)
+
+        log_say(f"Recording episode {episode_number} ended")
+        print(f"Episode {episode_number} recording ended. Resetting before save.", flush=True)
+
+        # Finish resetting first. No dataset frames are written during this phase.
+        if not events["stop_recording"]:
+            events["exit_early"] = False
+            reset_environment(episode_number)
+
         if events["rerecord_episode"]:
-            log_say("Re-record episode")
+            print(f"Discarding episode {episode_number}; it will not be saved.", flush=True)
             events["rerecord_episode"] = False
             events["exit_early"] = False
             dataset.clear_episode_buffer()
-            if not events["stop_recording"]:
-                reset_environment()
             continue
 
-        # Saving may synchronously encode all camera videos. Do it before reset so the reset
-        # loop drains observations buffered while encoding and the next episode starts live.
-        dataset.save_episode()
+        print(
+            f"Reset finished. Saving episode {episode_number}; this may take a while. Please wait...",
+            flush=True,
+        )
+        save_started_at = time.perf_counter()
+        with native_stderr_as_debug():
+            dataset.save_episode()
+        print(
+            f"Episode {episode_number} saved in {time.perf_counter() - save_started_at:.1f} second(s).",
+            flush=True,
+        )
         recorded_episodes += 1
-
-        if not events["stop_recording"] and recorded_episodes < args.num_episodes:
-            reset_environment()
+        events["rerecord_episode"] = False
+        events["exit_early"] = False
 
     # === Clean up ===
-    log_say("Stop recording")
     robot.disconnect()
     leader_arm.disconnect()
     keyboard.disconnect()
     if listener is not None:
         listener.stop()
-    dataset.finalize()
-    print(f"Dataset saved locally at: {dataset.root.resolve()}")
+    print("Saving dataset...", flush=True)
+    with native_stderr_as_debug():
+        dataset.finalize()
     if args.push_to_hub:
-        print(f"Uploading dataset to Hugging Face Hub: {dataset.repo_id}")
         dataset.push_to_hub()
-        print(f"Dataset uploaded to: https://huggingface.co/datasets/{dataset.repo_id}")
-    else:
-        print("Skipping Hugging Face upload because --push_to_hub is false.")
+    print(f"Dataset saved at {dataset.root.resolve()}", flush=True)
 
 
 if __name__ == "__main__":
