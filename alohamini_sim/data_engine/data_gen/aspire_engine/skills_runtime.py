@@ -35,6 +35,7 @@ SETTLE = 10
 HOLD = 22
 LIFT_HIGH = 0.16
 PICK_BACK = 0.11
+PICK_OVER_CLEAR = 0.015
 PITCH_DEFAULT = 60.0
 
 TABLE_X = (-0.43, 0.17)
@@ -407,12 +408,29 @@ class SkillRuntime:
             desc = _best_full_pose(self.env, grasp_pt, appr_dir, self.jaw_dir, "left", 0.0, seed=st1_arm_seed)
             appr = _best_full_pose(self.env, pre_pt, appr_dir, self.jaw_dir, "left", 0.0, seed=desc.arm_qpos)
 
+            # Regression fix (2026-07-17, vertical_move travel sync 040f932): with the
+            # corrected lift range [-0.3, 0.3] the carriage no longer parks on a hard
+            # lower stop at qpos 0, and the old straight-line 60-deg descent — which
+            # swept the palm across the object's top face and only grasped via a
+            # razor-margin push-wedge catch — stopped capturing the object (pushed
+            # ~5 cm, lift_delta ~0). Descend instead via a waypoint directly ABOVE the
+            # grasp point, then straight down, so the open fingers straddle the object
+            # before any contact. The over-clearance is derived from the object's
+            # actual half-height above the table plane, not from stale lift-era
+            # constants.
+            over_h = max(0.0, float(grasp_pt[2]) - TABLE_Z) + PICK_OVER_CLEAR
+            over_pt = (grasp_pt + np.array([0.0, 0.0, over_h], np.float32)).astype(np.float32)
+            waypoints = [
+                pre_pt + (over_pt - pre_pt) * t for t in np.linspace(0.0, 1.0, 6)[1:]
+            ] + [
+                over_pt + (grasp_pt - over_pt) * t for t in np.linspace(0.0, 1.0, 5)[1:]
+            ]
             descent = [appr.arm_qpos]
             seedq = appr.arm_qpos
-            for s in np.linspace(PICK_BACK, 0.0, 9)[1:]:
+            for pt in waypoints:
                 w = _best_full_pose(
                     self.env,
-                    (grasp_pt - appr_dir * s).astype(np.float32),
+                    np.asarray(pt, np.float32),
                     appr_dir,
                     self.jaw_dir,
                     "left",
