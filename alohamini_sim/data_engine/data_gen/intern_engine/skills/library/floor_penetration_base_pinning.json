@@ -1,0 +1,29 @@
+{
+  "name": "floor_penetration_base_pinning",
+  "category": "physics_setup",
+  "discovered": "2026-07-01",
+  "failure_signature": {
+    "symptoms": [
+      "Mobile base NAV commands have zero effect — base joints stay at start position despite position targets",
+      "Base appears frozen or pinned even when joint controllers are active"
+    ],
+    "trace_evidence": [
+      "Wheel<->floor contact impulses ~10,000 N·s (vs ~7 N·s expected from robot weight alone)",
+      "Wheel mesh collision geometry extends 7.3 mm below z=0 while floor top surface is at z=0",
+      "Constant floor interpenetration generates enormous normal forces that pin the base",
+      "Fixed/virtual root robot: wheel meshes loaded below floor plane at default spawn height"
+    ]
+  },
+  "when_to_apply": "Any time a wheeled or skid-steer mobile base spawns at z=0 and NAV commands produce no movement, especially when contact force logs show abnormally high normal impulses on wheel links.",
+  "repair_strategy": "Measure the lowest collision point of the base (mesh z-bounds + cumulative joint origins from root to wheel bottom). Spawn the robot root high enough that wheel bottoms REST on z=0 surface (we used +9 mm offset). With a fixed/virtual root, the robot weight is carried by the root joint so resting wheels have near-zero normal force and the base slides freely under NAV commands.",
+  "code_sketch": [
+    "# Measure lowest wheel point (run once at asset load time)",
+    "wheel_z_min = get_mesh_aabb(robot, link='wheel_fl').min_z  # e.g. -0.009 m",
+    "spawn_z = -wheel_z_min + 1e-4  # 0.1 mm clearance above floor",
+    "robot.set_pose(sapien.Pose(p=[x, y, spawn_z]))",
+    "# Verify fix: contact impulse on wheel links should drop to ~7 N·s"
+  ],
+  "validated_on": [
+    "AlohaMini Pro (ManiSkill GPU sim) 2026-07-01: root_x command 0.10 -> reached 0.10 exactly after +9 mm spawn offset; NAV then hit stations to mm accuracy"
+  ]
+}

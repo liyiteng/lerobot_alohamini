@@ -64,7 +64,10 @@ from lerobot.robots.alohamini.model_specs import arm_state_keys
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import hw_to_dataset_features
 
-from .writer_adapter import ACTION_NAMES as SIM_ACTION_NAMES, STATE_NAMES as SIM_STATE_NAMES
+from .data_gen.aspire_engine.writer_adapter import (
+    ACTION_NAMES as SIM_ACTION_NAMES,
+    STATE_NAMES as SIM_STATE_NAMES,
+)
 
 # The sim arms are 5 revolute joints + a parallel gripper, i.e. the so-arm-5dof profile
 # of the real AlohaMini (see lerobot.robots.alohamini.model_specs.ARM_PROFILE_JOINTS).

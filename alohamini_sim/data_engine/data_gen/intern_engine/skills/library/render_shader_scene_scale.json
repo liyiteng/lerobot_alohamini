@@ -1,0 +1,28 @@
+{
+  "name": "render_shader_scene_scale",
+  "category": "render_setup",
+  "discovered": "2026-07-02",
+  "failure_signature": {
+    "symptoms": [
+      "Process dies with SIGSEGV (exit 139) at the FIRST human-render camera capture — no Python traceback",
+      "Physics-only stages before the first render (scene build, contact checks, occupancy grids) all complete normally",
+      "Crash is deterministic: same location on every retry, unaffected by GPU cooldown or process isolation"
+    ],
+    "trace_evidence": [
+      "Kernel log: 'segfault ... in libEGL_nvidia.so' — driver-level crash, not catchable in Python",
+      "Scene is room-scale (ReplicaCAD apartment, ~478 actors) and shader_pack is a ray-tracing variant (rt / rt-fast)",
+      "Same script renders fine on small tabletop scenes with the same shader, and on the big scene with 'minimal'"
+    ]
+  },
+  "when_to_apply": "Any headless render that segfaults at the first frame on a large (hundreds of actors) scene while ray-tracing shader packs are enabled, especially on <=8GB GPUs. Also apply when a previously-working script starts segfaulting after a merge — check whether the merge changed the shader pack.",
+  "repair_strategy": "Use the rasterizer ('minimal' / 'default') shader pack for room-scale scenes; reserve rt/rt-fast for small tabletop showcases. Make the shader an env-var override (not a hardcoded constant) so merges cannot silently re-enable ray tracing, and log the chosen shader at startup so the failure is diagnosable from the run log alone.",
+  "code_sketch": [
+    "RENDER_SHADER_PACK = 'minimal'  # rt-fast segfaults in libEGL_nvidia on ~478-actor scenes",
+    "shader = os.environ.get('HAB_RENDER_SHADER_PACK', RENDER_SHADER_PACK)",
+    "print(f'[RENDERCFG] using_shader={shader}', flush=True)",
+    "env = make_env(shader_pack=shader)  # never hardcode rt-* at call sites"
+  ],
+  "validated_on": [
+    "AlohaMini Pro HAB demo (ReplicaCAD apt_5, ManiSkill 3.0.1, 8GB GPU) 2026-07-02: rt-fast crashed at first capture twice in a row; switching to 'minimal' passed the same capture and the full base-drive check on the next run"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "spurious_self_collision_bits",
+  "category": "physics_setup",
+  "discovered": "2026-07-01..02, AlohaMini Pro (gripper<->arm, arm<->mount, arm<->lift-column)",
+  "failure_signature": {
+    "symptoms": [
+      "the arm cannot reach or hold a commanded configuration although the IK solution is kinematically perfect",
+      "large steady-state error on PROXIMAL joints (shoulder ~0.7 rad) while distal joints track fine",
+      "physics 'explosions' (PhysX Illegal BroadPhaseUpdateData) when rigidly-attached parts overlap"
+    ],
+    "trace_evidence": [
+      "kinematic teleport to the IK solution -> TCP within ~1 mm; running physics on the SAME config -> TCP 150 mm off",
+      "contact pairs between links that are rigidly related or must legitimately pass close: arm_link <-> its mounting bracket / lift column / grafted gripper (impulse 8-33)"
+    ]
+  },
+  "when_to_apply": "SolidWorks/CAD-derived robots whose convex collision hulls over-approximate, causing contacts between links that can never truly collide (rigid subassemblies) or that must operate in close proximity by design.",
+  "repair_strategy": "Give every link of the rigidly-related subtree the SAME collision-group-2 bit (SAPIEN: pairs sharing a group-2 bit are ignored). Include easy-to-miss members: the arm's mounting BRACKET and the shared lift COLUMN, not just the serial-chain links. Keep object/table collision intact. Verify with a teleport+hold test: joint error should collapse (0.7 rad -> <0.1).",
+  "code_sketch": [
+    "group = ['vertical_link', f'{side}_base'] + [f'{side}_link{i}' for i in range(1, 5)]",
+    "group += [f'{side}_Fixed_Jaw', f'{side}_finger1', f'{side}_finger2', ...]",
+    "for name in group:",
+    "    robot_links[name].set_collision_group_bit(group=2, bit_idx=side_bit, bit=1)"
+  ],
+  "validated_on": [
+    "AlohaMini Pro: TCP error 152 mm -> 17 mm after adding left_base+vertical_link to the bit group; grasp then succeeded"
+  ]
+}

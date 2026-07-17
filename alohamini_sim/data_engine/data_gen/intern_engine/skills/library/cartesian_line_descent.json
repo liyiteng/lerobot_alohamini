@@ -1,0 +1,26 @@
+{
+  "name": "cartesian_line_descent",
+  "category": "motion_primitive",
+  "discovered": "2026-07-02, AlohaMini Pro grasp",
+  "failure_signature": {
+    "symptoms": [
+      "object is swept/raked sideways during the approach-to-grasp descent (moved several cm before the fingers close)",
+      "fingers close at the object's ORIGINAL location after the object has been nudged away"
+    ],
+    "trace_evidence": [
+      "object XY drifts during the descent phase (e.g. 58 mm) while finger/palm <-> object contacts flicker",
+      "trajectory = joint-space interpolation between only TWO IK solutions (pre-grasp, grasp) — the TCP path is an arc, not a line"
+    ]
+  },
+  "when_to_apply": "Any time the end-effector must move in a straight Cartesian line through clutter (final grasp descent, peg insertion, shelf reach) but the controller interpolates in joint space.",
+  "repair_strategy": "Discretize the Cartesian line into waypoints (8-10), solve IK at each waypoint seeded from the previous one, and joint-interp only BETWEEN CONSECUTIVE waypoints. The TCP then tracks the line to within the waypoint spacing.",
+  "code_sketch": [
+    "qs = [appr.arm_qpos]; seed = appr.arm_qpos",
+    "for s in np.linspace(back_off, 0.0, 9)[1:]:",
+    "    w = solve_arm_ik_full_pose(env, grasp_pt - d*s, d, jaw, seed=seed)",
+    "    qs.append(w.arm_qpos); seed = w.arm_qpos",
+    "for q0, q1 in zip(qs[:-1], qs[1:]):",
+    "    for q in interp(q0, q1, V_DESCEND): step(act(q))"
+  ],
+  "validated_on": ["AlohaMini Pro rubiks-cube grasp (object drift 58 mm -> ~5 mm)"]
+}

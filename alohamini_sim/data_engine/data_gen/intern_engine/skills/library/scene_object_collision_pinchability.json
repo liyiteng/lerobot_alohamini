@@ -1,0 +1,32 @@
+{
+  "name": "scene_object_collision_pinchability",
+  "category": "target_selection",
+  "discovered": "2026-07-03",
+  "failure_signature": {
+    "symptoms": [
+      "A parallel-jaw pinch slides/cams the object out during close no matter how well aligned (sub-mm fingertip error) or how high the pad friction",
+      "The same gripper pinches a spawned primitive-collision cube reliably in the same scene"
+    ],
+    "trace_evidence": [
+      "ReplicaCAD 'use_bounding_box_for_collision' objects are actually built as CONVEX HULLS OF THE VISUAL MESH by the ManiSkill scene builder (add_convex_collision_from_file(visual_file))",
+      "Measured book_04 hull: cover faces tilt 0-32 deg (mean 14.5) around the thin axis — no opposing parallel faces exist for the pads to pinch",
+      "Curved objects (remote, cups) use convex decompositions whose local contact normals rotate outward under squeeze — friction cannot hold a normal that points out of the jaw"
+    ]
+  },
+  "when_to_apply": "Any scene-dataset environment (ReplicaCAD/HSSD/scanned assets) where scripted pinches keep failing on scene furniture/props while primitive objects grasp fine. Check the collision build path FIRST — before tuning alignment, friction, or force.",
+  "repair_strategy": "Do not use scene-dataset furniture/props as pinch targets. Follow the benchmark protocol (ManiSkill-HAB rearrange): SPAWN manipulation targets with true primitive or YCB collision geometry into the scene (subclass the scene env, build the actor in _load_scene, register it in scene_builder.movable_objects/scene_objects so planners can see it). Give it an explicit PhysxMaterial (mu ~1.0) via the entity's PhysxRigidDynamicComponent.",
+  "code_sketch": [
+    "@register_env('MyHabPick-v1')",
+    "class MyHabPickEnv(SceneManipulationEnv):",
+    "    def _load_scene(self, options):",
+    "        super()._load_scene(options)",
+    "        self.cube = actors.build_cube(self.scene, half_size=0.0285, name='demo_pick_cube',",
+    "                                      initial_pose=sapien.Pose(p=[x, y, surface_top + 0.0305]))",
+    "        comp = self.cube._objs[0].find_component_by_type(physx.PhysxRigidDynamicComponent)",
+    "        for s in comp.get_collision_shapes(): s.set_physical_material(physx.PhysxMaterial(1.0, 1.0, 0.0))",
+    "        self.scene_builder.movable_objects['env-0_objects/demo_pick_cube'] = self.cube"
+  ],
+  "validated_on": [
+    "AlohaMini Pro HAB demo 2026-07-03: books/remote/utensil all failed 20+ pinch variants; spawned 5.7 cm cube on the dining table picked with lift_delta +7.1 cm reproducibly (6/6 runs) and completed NAV->pick->3.4 m carry->place at 2.5 cm error"
+  ]
+}

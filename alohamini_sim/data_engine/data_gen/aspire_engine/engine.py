@@ -11,20 +11,24 @@ from typing import Any
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
+# Root of the vendored package tree (upstream: the AlohaMini `maniskill/` checkout;
+# here: `alohamini_sim/data_engine/`). Putting it on sys.path makes the original
+# top-level imports (`data_gen.*`, `agents.*`) resolve from the vendored copies.
 MANISKILL_ROOT = Path(__file__).resolve().parents[2]
 if str(MANISKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(MANISKILL_ROOT))
 
+# Explicit registration imports (upstream relied on `import data_gen` importing
+# .tasks as a side effect; the vendored data_gen/__init__ is kept import-safe for
+# the LeRobot bridge, so register the agent uids and env ids here instead).
+import agents.aloha_mini  # noqa: F401  (registers aloha_mini_so100_v2 / _pro_v2 / _pro_v3)
+import data_gen.tasks  # noqa: F401  (registers AlohaMiniMultiYCB-v1 and friends)
 import gymnasium as gym
-import numpy as np
-
 import mani_skill.envs  # noqa: F401
-import data_gen  # noqa: F401
-from data_gen.intern_engine.skills.ik import actor_position, resolve_actor
-
+import numpy as np
 from data_gen.aspire_engine.skills_runtime import PITCH_DEFAULT, SkillRuntime
 from data_gen.aspire_engine.writer_adapter import AspireStateWriter
-
+from data_gen.intern_engine.skills.ik import actor_position, resolve_actor
 
 DEFAULT_OBJECT = "077_rubiks_cube"
 DEFAULT_TARGET_XY = np.array([0.06, -0.31], np.float32)
@@ -236,8 +240,12 @@ def run_episode(command: dict[str, Any], seed: int, cfg: Any) -> dict[str, Any] 
         if verb == "push":
             success = bool(xy_err <= 0.05)
         if not success:
-            _note_failure(cfg, runtime, "final_check",
-                          {"xy_err": xy_err, "target_xy": target_xy.tolist(), "object_final": objf.tolist()})
+            _note_failure(
+                cfg,
+                runtime,
+                "final_check",
+                {"xy_err": xy_err, "target_xy": target_xy.tolist(), "object_final": objf.tolist()},
+            )
             return None
 
         return {

@@ -1,0 +1,31 @@
+{
+  "name": "frozen_arm_base_lift_place",
+  "category": "motion_primitive",
+  "discovered": "2026-07-02, AlohaMini Pro NAV/MANIP pick-and-place (final placement fix)",
+  "failure_signature": {
+    "symptoms": [
+      "the held object is lost somewhere between a successful carry and the release",
+      "closed-loop corrections report converged IK but the object does not follow the TCP",
+      "placement error 70-190 mm that no release-height / approach-branch tweak fixes"
+    ],
+    "trace_evidence": [
+      "object tracking shows held=False right after any ARM reconfiguration block (carry config -> pre-place config), even at descend speed and with branch-continuous IK seeding",
+      "lowering the LIFT with the object held pressed the hanging object into the tabletop and popped it out (lift 0.16->0 = 16 cm blind drop vs ~9 cm of clearance)",
+      "raising gripper force 15->40 N ejected the object during the CLOSE instead (watermelon-seed effect)"
+    ]
+  },
+  "when_to_apply": "Mobile manipulator with a weak/flat-pad gripper carrying an object to a placement: any joint-space arm reconfiguration while holding tends to sling/twist the object out; the base and lift are far gentler DOFs.",
+  "repair_strategy": "Do not move the ARM at all between grasp and release. Keep the arm frozen in the carry configuration; do the horizontal fine-alignment with the BASE (closed-loop: re-measure the object, drive base by (target - object), 1-3 rounds), then descend with the LIFT ONLY by the measured amount (object_z - (surface + clearance)), settle, release, and retreat by raising the lift. The mobile platform is the precision mechanism; the arm only manipulates when the gripper is empty.",
+  "code_sketch": [
+    "# after NAV-2 (carry), arm stays at desc_q forever",
+    "for _ in range(3):   # closed-loop base alignment",
+    "    delta = target_xy - obj_xy()",
+    "    if norm(delta) < 0.008: break",
+    "    drive_base(cur_base + delta, V_BASE*0.5)",
+    "drop = obj_z() - (surface_z + 0.02)",
+    "lower_lift(0.16 - drop); settle; open_gripper(); raise_lift()"
+  ],
+  "validated_on": [
+    "AlohaMini Pro nav pick-and-place with REAL table+floor collision: placed=True, 10 mm error (from 78-190 mm with arm-motion variants)"
+  ]
+}

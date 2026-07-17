@@ -1,0 +1,36 @@
+{
+  "name": "linear_push",
+  "aka": "tabletop_xy_push",
+  "category": "motion_primitive",
+  "discovered": "2026-07-02, AlohaMini Pro linear push validation",
+  "failure_signature": {
+    "symptoms": [
+      "a flat/tabletop object must be moved in XY without grasping, but the gripper misses, rides over the object, or pushes far past the target",
+      "the push line is kinematically reachable at the endpoints but dense Cartesian waypoints develop large mid-line IK errors",
+      "the object contacts the gripper and starts moving, then overshoots the requested target after the TCP command continues too far"
+    ],
+    "trace_evidence": [
+      "no gripper<->object contacts during PUSH means the TCP is too high, too far behind, or the gripper approach axis does not face the push direction",
+      "seeded push-line IK can lose the horizontal full-pose branch mid-line (observed max waypoint error 48.5 mm) even when start/end solve at ~2 mm",
+      "cube trajectory crosses the target and keeps moving while finger<->object impulses continue; shortening the commanded endpoint fixes the overshoot"
+    ]
+  },
+  "when_to_apply": "Use when a mobile-base AlohaMini Std/Pro robot should push a tabletop object along the table/floor plane to a target XY, especially when grasping is unnecessary or unreliable.",
+  "repair_strategy": "Separate NAV and MANIP. First choose a manipulation station with the same teleport + physics settle + IK gate used for pick/place, keeping the root outside table/obstacle footprints. Orient the closed gripper with its approach axis parallel to the desired push direction and set the jaw axis perpendicular in the table plane. Move to a hover behind the object, descend to tip height near the object center z, then execute ~1 cm Cartesian IK waypoints along the horizontal push line. At each waypoint, seed from the previous solution but fall back to a shoulder-seed sweep when the residual jumps. Print object XY and contact pairs during execution; if there is no gripper contact, lower/reposition the line, and if the object overshoots, shorten the commanded TCP endpoint rather than changing the target.",
+  "code_sketch": [
+    "station = select_station_with_teleport_settle_ik(push_start, push_end)",
+    "push_dir = normalize(target_xy - object_xy); approach_dir = [push_dir.x, push_dir.y, 0]",
+    "jaw_dir = horizontal_perpendicular(push_dir); gripper = closed",
+    "start = object_center - approach_dir * backoff; start.z = object_center.z",
+    "end = target_center + approach_dir * tuned_endpoint_offset",
+    "for pt in cart_line(hover, start, spacing=0.01): q = full_pose_ik(pt, approach_dir, jaw_dir, seed=q)",
+    "for pt in cart_line(start, end, spacing=0.01):",
+    "    q = full_pose_ik(pt, approach_dir, jaw_dir, seed=q)",
+    "    if q.error is large: q = best_full_pose_seed_sweep(pt, approach_dir, jaw_dir)",
+    "    step(act(station, q, closed_gripper)); print cube_xy and scene.get_contacts()"
+  ],
+  "validated_on": [
+    "AlohaMini Pro / ManiSkill AlohaMiniMultiYCB-v1 / 077_rubiks_cube: north-edge station (-0.049,+0.040,yaw=-90deg), closed gripper at z=0.729, 11 cm southward target; RESULT success=True, obj_final=(-0.1266,-0.4079,0.7292), target=(-0.1300,-0.4200), xy_err=12.6 mm, on_table=True",
+    "Failure repairs observed during validation: full-pose branch fallback reduced push-line max IK error 48.5 mm -> 13.9 mm; shortened TCP endpoint fixed overshoot from 76.4 mm final error -> 12.6 mm"
+  ]
+}

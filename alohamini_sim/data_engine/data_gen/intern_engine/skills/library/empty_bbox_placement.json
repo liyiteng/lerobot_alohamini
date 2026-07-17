@@ -1,0 +1,31 @@
+{
+  "name": "empty_bbox_placement",
+  "category": "scene_understanding",
+  "discovered": "2026-07-02, real InternDataEngine (Isaac Sim) AlohaMini integration",
+  "failure_signature": {
+    "symptoms": [
+      "EVERY motion plan fails ('did not converge') for a robot that loads and looks fine",
+      "an object/robot is placed at an absurd pose (Z=-inf or FLT_MAX coordinates)",
+      "world poses of robot links read back as +-3.4028e38 / inf"
+    ],
+    "trace_evidence": [
+      "grasp targets fed to the planner have position components == FLT_MAX (3.4028e38)",
+      "the placement sampler computed Z from compute_bbox(robot).min which returned an EMPTY box (min=+FLT_MAX)",
+      "two compounding causes: the robot handle's .prim is the ArticulationRoot JOINT prim (its siblings, not children, hold the meshes) AND the URDF-imported visual meshes are invisible instance proxies that ComputeWorldBound(default) skips"
+    ]
+  },
+  "when_to_apply": "Any pipeline that derives placement/collision geometry from USD bounding boxes of URDF-imported articulated robots (Isaac Sim + omni URDF importer).",
+  "repair_strategy": "Make the bbox computation robust: if the fast Imageable.ComputeWorldBound path returns an empty range, (a) union each descendant Mesh's local extent/points directly (ignores visibility), (b) traverse INSTANCE PROXIES (Usd.PrimRange(root, Usd.TraverseInstanceProxies(...))), and (c) walk UP ancestor prims until geometry is found (root_joint -> the robot root Xform). Then validate: the robot must land on the floor, not at -inf.",
+  "code_sketch": [
+    "bound = UsdGeom.Imageable(prim).ComputeWorldBound(t, default_, render).ComputeAlignedBox()",
+    "if bound.IsEmpty() or not isfinite(bound.GetMin()[0]):",
+    "    search = prim",
+    "    for _ in range(5):",
+    "        gmin, gmax, n = extent_union_over_meshes(search, traverse_instance_proxies=True)",
+    "        if n and isfinite(gmin): return Range3d(gmin, gmax)",
+    "        search = search.GetParent()"
+  ],
+  "validated_on": [
+    "InternDataEngine A_on_B_region_sampler: robot Z -inf -> -0.006 (on floor); all 534 'Plan did not converge' failures resolved into real, valid grasp targets"
+  ]
+}

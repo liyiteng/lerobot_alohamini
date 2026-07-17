@@ -1,0 +1,35 @@
+{
+  "name": "station_relative_approach_dir",
+  "category": "ik",
+  "discovered": "2026-07-01",
+  "failure_signature": {
+    "symptoms": [
+      "After navigating to a new base station, a kinematically converged grasp (err ~4e-4 m) misses physically — palm rakes the object sideways during descent",
+      "Pick lift is 0 cm; object is pushed laterally instead of lifted"
+    ],
+    "trace_evidence": [
+      "approach-direction helper had a hardcoded origin (base_xy=(-0.35, 0)) valid only for the original fixed-base layout",
+      "From any other station the tilted approach leans from the wrong side",
+      "Object pushed 6.6 cm horizontally in the direction opposite the wrong lean"
+    ]
+  },
+  "when_to_apply": "Any manipulation that uses a tilted or angled approach direction with a mobile base, or any helper that computes approach vectors from a fixed reference position rather than the live arm-base position.",
+  "repair_strategy": "Always compute the approach direction's horizontal component from the robot's ACTUAL current arm-base position (FK query at plan time), both when scoring candidate stations and when planning the manipulation. Pass the live arm-base xy to desired_approach_dir() and any station-scoring heuristic instead of hardcoding a home position.",
+  "code_sketch": [
+    "# BAD — hardcoded origin",
+    "# approach = desired_approach_dir(target_pos, pitch=0.3, base_xy=(-0.35, 0))",
+    "",
+    "# GOOD — live FK query",
+    "arm_base_world = robot.get_link_pose('left_arm_base').p[:2]  # (x, y)",
+    "approach = desired_approach_dir(target_pos, pitch=0.3, base_xy=arm_base_world)",
+    "",
+    "# Also fix station scoring so it uses live arm position:",
+    "def score_station(station_xy, target_pos, robot):",
+    "    arm_base = fk_arm_base_at_station(robot, station_xy)",
+    "    approach = desired_approach_dir(target_pos, pitch=0.3, base_xy=arm_base)",
+    "    return reachability_score(target_pos, approach, station_xy)"
+  ],
+  "validated_on": [
+    "AlohaMini Pro (ManiSkill GPU sim) 2026-07-01: pick lift went from 0 cm (object pushed 6.6 cm sideways) to +11 cm lift after passing live arm_base_xy to approach helper"
+  ]
+}
