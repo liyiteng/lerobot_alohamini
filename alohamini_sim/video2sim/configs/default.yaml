@@ -1,0 +1,91 @@
+# video2sim — standard validated recipe (defaults of record).
+#
+# These values mirror the argparse defaults of the pipeline modules; this file
+# is the documented single source of the recipe. Every number below is a
+# hard-won fix from ~10 failed runs — do NOT "improve" without re-validating.
+#
+# Global traps (apply across stages):
+#   * GPU must be EXCLUSIVE for CUDA SfM / LingBot inference / gsplat training
+#     — an open Isaac GUI alone eats 3-4 GB of the 8 GB card.
+#   * --single-camera is MANDATORY for video SfM (one phone track = one camera).
+#   * Depth regularization may ONLY pair with SAME-track poses (identical world
+#     frame); cross-track pairing silently corrupts geometry instead of
+#     killing floaters.
+#   * NuRec needs an SH3 zero-padded PLY — an SH0-only payload hits a
+#     pathological ~47 s/frame slow path (zero f_rest is visually identical).
+#   * MCMC-trained splats must NOT be opacity-pruned (min_opacity pruning
+#     deletes ~79% of an MCMC ensemble); pruning is SPATIAL only.
+#   * rasterization packed=True ALWAYS; pose optimization anchors view 0.
+
+extract:            # video2sim.extract (main venv + ffmpeg)
+  # Frame extraction rate: dense enough for sequential matching on a
+  # walking-speed phone pass, sparse enough to keep feature extraction
+  # tractable. Thinning happens HERE, at extraction — downstream always
+  # runs stride 1.
+  fps: 8
+
+lingbot:            # video2sim.lingbot_infer (main venv + PYTHONPATH=fork + ninja)
+  # fp8 KV cache + sliding-window 48 is THE LingBot 8GB recipe: the fork's
+  # FlashInfer paged-KV pool at its default max_frame_num=1024 was 6.7 GB on
+  # its own -> OOM on 8 GB. (max_frame_num itself is sized per run to the
+  # actual sequence +8 by lingbot_infer, not configured here; image_size
+  # stays 518 — the ckpt pos_embed is size-bound.)
+  sw: 48
+  # fp8 KV halves the cache. Its CUDA extension is JIT-compiled at first use
+  # and needs ninja on the venv bin (check_env verifies this).
+  fp8: true
+  # Pipeline invariant: prediction index i pairs with sorted jpg i everywhere
+  # (fuse, to_colmap, train --depth-reg). Never thin here — see extract.fps.
+  stride: 1
+
+fuse:               # video2sim.fuse (main venv)
+  # ScalableTSDFVolume voxel size in metres (4 mm, sdf_trunc 0.02):
+  # collider-grade surface detail that still fits RAM (fuse guards at
+  # 45 GB RSS on the 31 GB box).
+  voxel: 0.004
+  # LingBot depth-confidence threshold for the MV-consistency filter. The
+  # kept-pixel % doubles as a pose-health metric: same-track poses hold
+  # ~88%, cross-track poses collapse to ~58%.
+  conf: 2.3
+
+refine:             # video2sim.refine (main venv)
+  # Floor->ceiling metric anchor in metres for scale recovery. Falls back to
+  # the phone hand-height anchor (1.35 m) when no horizontal ceiling plane
+  # (|n_z| > 0.8) is visible in the upper 40% of the aligned points.
+  ceiling: 2.4
+
+to_colmap:          # video2sim.to_colmap (main venv)
+  # Init-point subsample from the MV-consistent TSDF cloud. The dense init
+  # IS the InstantSplat fast path: growth-free training converged in 10k
+  # iters vs 80k, with 38x fewer floaters.
+  max_points: 350000
+
+train:              # video2sim.train (main venv, GPU exclusive)
+  # 10k iters suffices BECAUSE of the dense 350k-point init (see to_colmap);
+  # from-sparse growth needed 80k.
+  iters: 10000
+  # Full resolution. Fits on 8 GB only because rasterization packed=True
+  # (sparse tile-intersection buffers) is used ALWAYS — 2x downscale still
+  # died at ~260k gaussians @1080p without packed.
+  downscale: 1
+  # MCMC cap_max (max gaussian count) — matched to the init size; relocation
+  # stops at 80% of iters (settle phase). The output is an MCMC ensemble:
+  # downstream must NOT opacity-prune it.
+  cap: 350000
+  # Joint per-view se3 pose refinement through the rasterizer's viewmat
+  # gradients (lr 1e-4), view 0 frozen as the gauge anchor. Absorbs
+  # feedforward-pose drift (LingBot: 54 cm rms vs BA) without SfM.
+  pose_opt: true
+
+export:             # video2sim.export (main venv; USDZ step under nurec-venv)
+  # Free-space floater pruning radius in metres against the MV-consistent
+  # TSDF surface oracle: gaussians farther than this from ANY surface point
+  # are drifting fog. Conservative on purpose — TSDF holes (unobserved
+  # areas) only lose gaussians beyond the radius. SPATIAL criterion ONLY:
+  # opacity pruning is FORBIDDEN for MCMC ensembles (~79% deleted).
+  prune_radius: 0.20
+
+scene:              # video2sim.scene (isaac5-venv)
+  # Splat-safe dome light intensity: 1200+ (the mesh-room recipe) overexposes
+  # the NuRec splat to white blur; the approved GUI views used ~350-450.
+  dome: 450
