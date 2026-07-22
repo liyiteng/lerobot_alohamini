@@ -45,6 +45,7 @@ from lerobot.utils.constants import (
 from lerobot.utils.feature_utils import dataset_to_policy_features
 
 from .act.configuration_act import ACTConfig
+from .am_act.configuration_am_act import AMACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig
 from .eo1.configuration_eo1 import EO1Config
 from .evo1.configuration_evo1 import Evo1Config
@@ -92,7 +93,7 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
     at once, improving startup time and reducing dependencies.
 
     Args:
-        name: The name of the policy. Supported names are "tdmpc", "diffusion", "act",
+        name: The name of the policy. Supported names are "tdmpc", "diffusion", "act", "am_act",
             "multi_task_dit", "vqbet", "pi0", "pi05", "gaussian_actor", "smolvla", "wall_x",
             "molmoact2", "eo1", "evo1".
     Returns:
@@ -113,6 +114,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .act.modeling_act import ACTPolicy
 
         return ACTPolicy
+    elif name == "am_act":
+        from .am_act.modeling_am_act import AMACTPolicy
+
+        return AMACTPolicy
     elif name == "multi_task_dit":
         from .multi_task_dit.modeling_multi_task_dit import MultiTaskDiTPolicy
 
@@ -193,7 +198,7 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
 
     Args:
         policy_type: The type of the policy. Supported types include "tdmpc",
-                     "multi_task_dit", "diffusion", "act", "vqbet", "pi0", "pi05", "gaussian_actor",
+                     "multi_task_dit", "diffusion", "act", "am_act", "vqbet", "pi0", "pi05", "gaussian_actor",
                      "smolvla", "wall_x", "molmoact2", "eo1", "evo1".
         **kwargs: Keyword arguments to be passed to the configuration class constructor.
 
@@ -209,6 +214,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DiffusionConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
+    elif policy_type == "am_act":
+        return AMACTConfig(**kwargs)
     elif policy_type == "multi_task_dit":
         return MultiTaskDiTConfig(**kwargs)
     elif policy_type == "vqbet":
@@ -372,6 +379,14 @@ def make_pre_post_processors(
         from .act.processor_act import make_act_pre_post_processors
 
         processors = make_act_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, AMACTConfig):
+        from .am_act.processor_am_act import make_am_act_pre_post_processors
+
+        processors = make_am_act_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )
