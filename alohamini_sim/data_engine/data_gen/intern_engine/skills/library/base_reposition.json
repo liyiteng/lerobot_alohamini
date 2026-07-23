@@ -1,0 +1,34 @@
+{
+  "name": "base_reposition",
+  "aka": "multi_angle_approach",
+  "category": "navigation",
+  "discovered": "2026-07-02, AlohaMini Pro grasp + real-InternDataEngine pick task",
+  "failure_signature": {
+    "symptoms": [
+      "IK/motion plan fails or converges with large position error although the grasp target itself is valid",
+      "planner reports 'did not converge' for EVERY sampled grasp pose of a reachable-looking object",
+      "arm stretches into a near-singular, contorted or self-overlapping configuration to reach"
+    ],
+    "trace_evidence": [
+      "target distance from the arm base exceeds the FK-sampled reach envelope (AlohaMini Pro: radial max ~0.425 m)",
+      "goal position in arm-base frame outside envelope bounds (e.g. y=+0.43 vs y-max +0.22)",
+      "kinematic teleport to the IK solution shows tiny TCP error, i.e. the solver is fine — the geometry is the problem"
+    ]
+  },
+  "when_to_apply": "The robot has a mobile base (even a position-held virtual one) and the manipulation target is outside or at the edge of the arm's comfortable envelope, or every IK/plan attempt from the current base pose fails.",
+  "repair_strategy": "Do NOT keep tuning the arm. Sample candidate base stations around the target (grid or rotated approach angles a la ASPIRE), evaluate each by teleporting the base joints there and solving the manipulation IK, pick the best-scoring station, NAV the base there with the arm tucked, and only then run the manipulation. Separate NAV and MANIP phases explicitly.",
+  "code_sketch": [
+    "for dx in (-0.10, -0.05, 0.0, 0.05, 0.10):",
+    "    for by in (0.10, 0.05, 0.01):            # stay outside obstacle footprints",
+    "        q[base_ids] = station(dx, by); set_qpos(q)",
+    "        r = solve_arm_ik_full_pose(env, target, tilted_dir, jaw_dir, ...)",
+    "        best = min(best, (r.error, station))",
+    "set_qpos(q0)",
+    "nav_actions = [act(b, ARM_TUCKED, open) for b in interp(base_now, best.station, V_BASE)]",
+    "then run the validated manipulation recipe from the settled station"
+  ],
+  "validated_on": [
+    "AlohaMini Pro / ManiSkill AlohaMiniMultiYCB-v1: pick station ik_err 4e-4, place station 1e-3; pick->carry 15.5cm->place 18 mm error, first try",
+    "matches ASPIRE Fig.2 'Multi-Angle Approach' (BEHAVIOR-1K navigate-and-pick-up-radio)"
+  ]
+}

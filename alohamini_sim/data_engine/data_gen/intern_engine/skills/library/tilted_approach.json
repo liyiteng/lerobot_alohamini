@@ -1,0 +1,27 @@
+{
+  "name": "tilted_approach",
+  "category": "motion_primitive",
+  "discovered": "2026-07-01 (AlohaMini Std demos), re-validated 2026-07-02 (Pro)",
+  "failure_signature": {
+    "symptoms": [
+      "object gets pushed away during a vertical top-down descent instead of being straddled",
+      "gripper closes on air just above the object although the tip midpoint XY matches the object"
+    ],
+    "trace_evidence": [
+      "contact pair palm/Fixed_Jaw <-> object appears during descent (impulse ~0.2-0.5) while tips are still above the grasp height",
+      "descent stalls: tip z stops ~30-70 mm above the IK target"
+    ]
+  },
+  "when_to_apply": "The gripper palm has geometry (central spike/frame) that protrudes toward the tool axis between the fingers — a true vertical approach bottoms the palm on the object top before the fingers straddle it.",
+  "repair_strategy": "Tilt the approach axis back from vertical so the palm clears the object top while the jaws still straddle it. For the roboninecom parallel gripper on AlohaMini, pitch 55-70 deg (from horizontal) all succeed; 45 deg gets marginal, 90 deg (vertical) fails. Back off along the tilted axis for the pre-grasp, and descend ALONG that axis.",
+  "code_sketch": [
+    "d = desired_approach_dir(obj_pos, pitch_deg=60)     # down-and-forward unit vector",
+    "pre = grasp_pt - d * 0.11",
+    "desc = solve_arm_ik_full_pose(env, grasp_pt, d, jaw_dir, ...)",
+    "descend along d (see cartesian_line_descent)"
+  ],
+  "validated_on": [
+    "AlohaMini Std: dice/golf_ball/strawberry/lego at pitches 30-60",
+    "AlohaMini Pro: rubiks cube at 55/60/65/70 (9/9 showcase clips success)"
+  ]
+}

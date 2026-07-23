@@ -1,0 +1,22 @@
+{
+  "name": "desc_first_ik_branch",
+  "category": "ik",
+  "discovered": "2026-07-02, AlohaMini Pro grasp",
+  "failure_signature": {
+    "symptoms": [
+      "the wrist/forearm link lands ON TOP of the object during descent, blocking it",
+      "descent stalls high; fingers close beside/above the object"
+    ],
+    "trace_evidence": [
+      "contact pair wrist_link (e.g. link5) <-> object with impulse ~1-2 during descent",
+      "the grasp-config IK was SEEDED from the pre-grasp solution (same-branch continuation into a wrist-low posture)"
+    ]
+  },
+  "when_to_apply": "Redundant or branch-rich arms where seeding the grasp IK from the pre-grasp solution continues into a bad branch (wrist below the tool line).",
+  "repair_strategy": "Invert the seeding order: solve the GRASP config first with a seed sweep (pick the lowest-error, wrist-high branch), then solve the PRE-GRASP seeded FROM the grasp solution. The approach then hovers directly above in the same good branch and the descent is a short straight drop.",
+  "code_sketch": [
+    "desc = best_full_pose(env, grasp_pt, d, jaw, seed_sweep=True)   # own sweep, NOT seeded",
+    "appr = best_full_pose(env, pre_pt,  d, jaw, seed=desc.arm_qpos) # seeded FROM desc"
+  ],
+  "validated_on": ["AlohaMini Pro rubiks-cube grasp (wrist-on-cube contact eliminated)"]
+}

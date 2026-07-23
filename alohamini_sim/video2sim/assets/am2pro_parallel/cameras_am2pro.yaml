@@ -1,0 +1,53 @@
+# AlohaMini2 Pro (parallel gripper) — 5-camera real2sim set
+# Hardware: H65V1 x5 (JX-H65 1/3" sensor, 2.4mm lens) -> HFOV 90deg, VFOV 73.7deg
+# Real capture (LeRobot): 640x480@30 -> fx=fy=320, c=(320,240)
+cameras:
+  chest_camera:
+    parent_link: vertical_link
+    origin_xyz: [-0.000225761875701821, -0.0690163597583236, 0.447985436693376]
+    origin_rpy: [1.57079632679491, 1.5707963267949, 0]
+    resolution: [640, 480]
+    intrinsics_fx_fy_cx_cy: [320.0, 320.0, 320.0, 240.0]
+    hfov_deg: 90.0
+    vfov_deg: 73.7
+    fps: 30
+  back_camera:
+    parent_link: base_link
+    origin_xyz: [0.00034085, 0.16827, 1.0972]
+    origin_rpy: [-3.1416, -0.63429, 1.5708]
+    resolution: [640, 480]
+    intrinsics_fx_fy_cx_cy: [320.0, 320.0, 320.0, 240.0]
+    hfov_deg: 90.0
+    vfov_deg: 73.7
+    fps: 30
+  front_camera:
+    parent_link: base_link
+    origin_xyz: [0.000309285647814801, -0.0549084504780031, 1.10145847792887]
+    origin_rpy: [-3.14159265358978, 0.78538567812397, 1.5707963267949]
+    resolution: [640, 480]
+    intrinsics_fx_fy_cx_cy: [320.0, 320.0, 320.0, 240.0]
+    hfov_deg: 90.0
+    vfov_deg: 73.7
+    fps: 30
+  left_camera:
+    # seated on the Robo9 gripper camera-mount tower (28.8deg sloped plate), the
+    # real retrofit position; optical frame = link frame composed with Rx(pi)
+    # (module +z optical axis -> USD camera -z view). Joint (URDF): xyz
+    # (-0.001,0.0631,0.0327) rpy (0.503,0,0) in left_Fixed_Jaw.
+    parent_link: left_Fixed_Jaw
+    origin_xyz: [-0.001, 0.0631, 0.0327]
+    origin_rpy: [-2.63859265, 0.0, 0.0]   # 0.503 + pi (wrapped)
+    resolution: [640, 480]
+    intrinsics_fx_fy_cx_cy: [320.0, 320.0, 320.0, 240.0]
+    hfov_deg: 90.0
+    vfov_deg: 73.7
+    fps: 30
+  right_camera:
+    parent_link: right_Fixed_Jaw
+    origin_xyz: [-0.001, 0.0631, 0.0327]
+    origin_rpy: [-2.63859265, 0.0, 0.0]   # mirrors left (same tower seat)
+    resolution: [640, 480]
+    intrinsics_fx_fy_cx_cy: [320.0, 320.0, 320.0, 240.0]
+    hfov_deg: 90.0
+    vfov_deg: 73.7
+    fps: 30

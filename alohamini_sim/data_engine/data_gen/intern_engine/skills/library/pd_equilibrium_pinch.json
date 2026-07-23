@@ -1,0 +1,33 @@
+{
+  "name": "pd_equilibrium_pinch",
+  "category": "motion_primitive",
+  "discovered": "2026-07-03",
+  "failure_signature": {
+    "symptoms": [
+      "Object is extruded sideways centimeters-to-meters during the gripper close despite perfect fingertip alignment",
+      "Object lifts a few cm then is dropped during the base carry, often at path bends",
+      "Failure modes flip-flop as arm control is toggled between teleport(force)-stepping and plain PD"
+    ],
+    "trace_evidence": [
+      "Force-stepped (set_qpos) arm + closing pads = per-step depenetration impulses 'conveyor' the object out (32 cm over a 42-step close); on curved bodies it ejects meters",
+      "Switching force->PD mid-sequence makes the arm jump to its PD equilibrium (cm-scale at extended poses) and the open fingers sweep the object away (13.7 cm with 0.7 mm-aligned tips)",
+      "Pure PD cannot track extended poses open-loop (4 cm gravity sag) but an ITERATIVE tip-servo (measure fingertip midpoint, re-aim secant, 2-3 rounds) converges to sub-mm ON the equilibrium",
+      "Position-target grippers STALL at contact: holding force = min(kp*command_gap, force_limit), so the force_limit IS the grip; 15 N lost a 185 g cube at the first carry turn, 60 N carried it 5+ m",
+      "Carry drops at path bends localize to furniture: the extended arm + object protrude ~0.4 m beyond the base collision disk used by A*"
+    ]
+  },
+  "when_to_apply": "Scripted pick pipelines that mix teleport-stepping with PD control, or whose close/carry loses the object while alignment metrics look perfect.",
+  "repair_strategy": "ONE control regime for the whole pick: plain PD from approach to release — never teleport-step the arm and never switch regimes while fingers are near/holding the object. Correct reach errors with a closed-loop fingertip servo (measure physical fingertip midpoint vs grasp point, re-aim by the measured offset, iterate <=3). Command a partial close (object width minus ~1-3x the gripper's PD stall gap), then raise the gripper drive force_limit (and stiffness) AFTER the lift for the carry. Plan the carry path with an inflated robot radius (~0.45 m) covering the arm+object overhang, at reduced base speed. Place onto the NEAREST valid surface — every extra carry meter is risk.",
+  "code_sketch": [
+    "self.force_action_qpos = False                      # pure PD, whole pick",
+    "for _ in range(3):                                   # fingertip servo on the PD equilibrium",
+    "    err = grasp_pt - fingertip_mid();  aim += err;  move_arm(ik(aim));  settle()",
+    "close_to(object_width - stall_gap)                   # partial close: no through-object target",
+    "for j in gripper_joints: j.set_drive_properties(stiffness=2000, damping=100, force_limit=60)",
+    "path = astar(obstacles, start, goal, robot_radius=0.45)  # arm overhang clearance",
+    "drive(path, speed=V_BASE * 0.25)"
+  ],
+  "validated_on": [
+    "AlohaMini Pro, ReplicaCAD apartment 2026-07-03 (v36): NAV -> PD pick (lift +7.1 cm, 6/6) -> 3.42 m carry held=True -> place 2.5 cm xy error, SUCCESS end-to-end"
+  ]
+}

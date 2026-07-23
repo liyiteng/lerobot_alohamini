@@ -1,0 +1,35 @@
+{
+  "name": "elevated_release_place",
+  "category": "motion_primitive",
+  "discovered": "2026-07-01",
+  "failure_signature": {
+    "symptoms": [
+      "Tilted-axis place drags the object several cm along the lean direction; final placement error 70-190 mm",
+      "Object's final offset vector matches the horizontal lean direction of the approach axis"
+    ],
+    "trace_evidence": [
+      "Descending the held object all the way to surface height means object contacts table while gripper keeps moving along tilted axis",
+      "Table friction drags the object in the lean direction as the gripper continues its tilted descent",
+      "Offset direction is consistent with the horizontal component of the tilted approach vector"
+    ]
+  },
+  "when_to_apply": "Any place motion that uses a tilted or angled approach axis (not purely vertical), especially when combined with a mobile base at a non-default station (see station_relative_approach_dir).",
+  "repair_strategy": "Stop the place descent 1.5–2.5 cm ABOVE the target surface height, open the gripper there (short free-fall drop of ~15-25 mm), then retreat along the approach axis. Also ensure the place approach direction is computed from the actual live arm-base position (see station_relative_approach_dir skill) rather than a hardcoded origin.",
+  "code_sketch": [
+    "PLACE_HOVER_CLEARANCE = 0.020  # 2 cm above surface",
+    "",
+    "# Descend to hover height, NOT to surface",
+    "hover_pos = target_surface_z + PLACE_HOVER_CLEARANCE",
+    "move_along_approach_axis(arm, target_pos_at_hover)",
+    "",
+    "# Open gripper and let object drop",
+    "gripper.open()",
+    "wait_steps(8)  # ~0.13 s at 60 Hz — object settles",
+    "",
+    "# Retreat along approach axis",
+    "retreat(arm, direction=approach_axis, distance=0.08)"
+  ],
+  "validated_on": [
+    "AlohaMini Pro (ManiSkill GPU sim) 2026-07-01: place error reduced from 73 mm with surface-contact descent; rerun with elevated release pending (expected <60 mm)"
+  ]
+}

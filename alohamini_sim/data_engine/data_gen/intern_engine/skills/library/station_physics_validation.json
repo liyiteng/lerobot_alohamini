@@ -1,0 +1,28 @@
+{
+  "name": "station_physics_validation",
+  "category": "navigation",
+  "discovered": "2026-07-02, AlohaMini Pro nav pick-and-place after re-enabling base<->table collision",
+  "failure_signature": {
+    "symptoms": [
+      "the robot base visually overlaps/penetrates furniture at its manipulation station",
+      "base cannot hold the commanded station pose: it drifts or gets shoved during manipulation",
+      "manipulation succeeded only because obstacle<->base collision had been hacked off"
+    ],
+    "trace_evidence": [
+      "candidate station lies inside an obstacle footprint (table slab x[-0.43,0.17] y[-0.69,-0.21] in the AlohaMini scene)",
+      "after teleporting to the station and stepping physics, |base_actual - base_target| grows above ~2 cm",
+      "contact pairs base_link/vertical_link <-> table appear with large impulse"
+    ]
+  },
+  "when_to_apply": "Whenever selecting a mobile-base station near obstacles — a kinematically-perfect station is worthless if physics rejects it.",
+  "repair_strategy": "Gate every candidate station with a physics settle-check: teleport the base joints there, hold the pose for a few control steps, and reject the candidate if the base got pushed off target (obstacle contact) before even scoring its IK. Never disable obstacle collision to force a station; move the TARGET (or the object) into range of a legal station instead.",
+  "code_sketch": [
+    "q[base_ids] = candidate; set_qpos(q)",
+    "for _ in range(6): env.step(hold_action)      # physics votes on the station",
+    "if hypot(*(qpos[base_ids][:2] - candidate)) > 0.02: continue   # rejected",
+    "r = solve_arm_ik_full_pose(...); score = r.error"
+  ],
+  "validated_on": [
+    "AlohaMini Pro nav pick-and-place with real base<->table collision (bit-24 hack removed)"
+  ]
+}
