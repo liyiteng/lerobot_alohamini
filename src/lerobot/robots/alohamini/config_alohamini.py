@@ -23,7 +23,11 @@ from ..config import RobotConfig
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
     return {
         "forward": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_forward", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+            index_or_path="/dev/am_camera_forward",
+            fps=30,
+            width=640,
+            height=480,
+            rotation=Cv2Rotation.NO_ROTATION,
         ),
         # "backward": OpenCVCameraConfig(
         #     index_or_path="/dev/am_camera_backward", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
@@ -35,7 +39,11 @@ def alohamini_cameras_config() -> dict[str, CameraConfig]:
         #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
         # ),
         "wrist_right": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_wrist_right", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
+            index_or_path="/dev/am_camera_wrist_right",
+            fps=30,
+            width=640,
+            height=480,
+            rotation=Cv2Rotation.NO_ROTATION,
         ),
     }
 
@@ -53,10 +61,16 @@ class AlohaMiniConfig(RobotConfig):
     # alohamini2pro– am-follower-6dof-hd,  base sts3250, lift sts3095, lead=131 mm/rev
     robot_model: str = "alohamini2"
 
-    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
-    # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
-    # the number of motors in your follower arms.
-    max_relative_target: int | None = None
+    # `max_relative_target` limits each commanded position's lead over measured
+    # feedback. Keep it optional because the actuator motion profile below is the
+    # primary speed/acceleration constraint.
+    max_relative_target: float | dict[str, float] | None = None
+
+    # Native Feetech position-mode motion profile, in raw register units. Keeping
+    # this at the actuator preserves responsive target streaming while bounding the
+    # physical motion produced by a distant or discontinuous position target.
+    arm_goal_velocity: int = 2000
+    arm_acceleration: int = 100
 
     cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
@@ -67,7 +81,12 @@ class AlohaMiniConfig(RobotConfig):
     # Use together with --no_leader on the teleoperate side for base-only teleoperation.
     no_follower: bool = False
 
-
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not 1 <= self.arm_goal_velocity <= 3400:
+            raise ValueError("arm_goal_velocity must be in [1, 3400].")
+        if not 1 <= self.arm_acceleration <= 254:
+            raise ValueError("arm_acceleration must be in [1, 254].")
 
 
 @dataclass
@@ -92,21 +111,6 @@ class AlohaMiniHostConfig:
 
     # If robot jitters decrease the frequency and monitor cpu load with `top` in cmd
     max_loop_freq_hz: int = 50
-
-    # Host-side arm trajectory execution. Incoming ROS/teleoperation positions are
-    # targets, not values that are written directly to the servos.
-    # Responsive enough for 50 Hz leader/Joy-Con target streams while still bounding
-    # discontinuous or malformed upstream position jumps.
-    trajectory_max_velocity: float = 240.0
-    trajectory_max_acceleration: float = 2400.0
-
-    # Slow the whole arm trajectory when a joint starts lagging, and freeze trajectory
-    # progress at the hard threshold. Units match the configured arm position units
-    # (degrees when use_degrees=True, otherwise normalized position units).
-    tracking_error_soft: float = 10.0
-    tracking_error_hard: float = 30.0
-
-
 
 
 @RobotConfig.register_subclass("alohamini_client")

@@ -212,8 +212,11 @@ class AlohaMini(Robot):
         # depending on the motion, so the retreat direction is inferred per contact
         # episode instead of configured. And unlike the gripper, we don't want to keep
         # nudging force into whatever it hit -- this is collision protection, not grip
-        # force, so it just freezes at the held position.
+        # force, so it just freezes at the held position. Require a short sustained
+        # overcurrent to reject normal acceleration spikes at 50 Hz.
         self._joint_current_limit_ma = 1800.0
+        self._joint_overcurrent_trip_n = 3
+        self._joint_overcurrent_count: dict[str, int] = {}
         self._joint_release_margin = 1.0
         self._joint_hold_goal: dict[str, float] = {}
         self._joint_hold_direction: dict[str, float] = {}
@@ -446,6 +449,18 @@ class AlohaMini(Robot):
         self.left_bus.configure_motors()
         for name in self.left_arm_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+            self.left_bus.write(
+                "Goal_Velocity",
+                name,
+                self.config.arm_goal_velocity,
+                normalize=False,
+            )
+            self.left_bus.write(
+                "Acceleration",
+                name,
+                self.config.arm_acceleration,
+                normalize=False,
+            )
             # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
             self.left_bus.write("P_Coefficient", name, 16)
             # Set I_Coefficient and D_Coefficient to default value 0 and 32
@@ -462,6 +477,18 @@ class AlohaMini(Robot):
             self.right_bus.configure_motors()
             for name in self.right_arm_motors:
                 self.right_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+                self.right_bus.write(
+                    "Goal_Velocity",
+                    name,
+                    self.config.arm_goal_velocity,
+                    normalize=False,
+                )
+                self.right_bus.write(
+                    "Acceleration",
+                    name,
+                    self.config.arm_acceleration,
+                    normalize=False,
+                )
                 self.right_bus.write("P_Coefficient", name, 16)
                 self.right_bus.write("I_Coefficient", name, 0)
                 self.right_bus.write("D_Coefficient", name, 32)
@@ -867,7 +894,7 @@ class AlohaMini(Robot):
         )
 
     def _limit_joint_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
-        """Freeze an arm joint (not the gripper) once its measured current exceeds the limit."""
+        """Freeze a joint after sustained overcurrent; ignore isolated current spikes."""
         return self._limit_goal_by_current(
             bus,
             goal_pos,
@@ -876,6 +903,8 @@ class AlohaMini(Robot):
             release_margin=self._joint_release_margin,
             hold_goal_state=self._joint_hold_goal,
             hold_direction_state=self._joint_hold_direction,
+            overcurrent_count_state=self._joint_overcurrent_count,
+            overcurrent_trip_n=self._joint_overcurrent_trip_n,
             fixed_direction=None,
             hold_close_step=0.0,
             log_tag="JointCurrentLimit",
@@ -894,6 +923,8 @@ class AlohaMini(Robot):
         fixed_direction: dict[str, float] | None,
         hold_close_step: float,
         log_tag: str,
+        overcurrent_count_state: dict[str, int] | None = None,
+        overcurrent_trip_n: int = 1,
     ) -> dict[str, float]:
         """Freeze a motor's goal once its current exceeds the limit, holding there until the
         caller's own goal asks to move back past the held position.
@@ -935,7 +966,15 @@ class AlohaMini(Robot):
 
             if motor not in hold_goal_state:
                 if current_ma < current_limit_ma:
+                    if overcurrent_count_state is not None:
+                        overcurrent_count_state.pop(motor, None)
                     continue
+                if overcurrent_count_state is not None:
+                    count = overcurrent_count_state.get(motor, 0) + 1
+                    overcurrent_count_state[motor] = count
+                    if count < overcurrent_trip_n:
+                        continue
+                    overcurrent_count_state.pop(motor, None)
                 command_delta = goal - present
                 if command_delta > 0.0:
                     release_direction = -1.0

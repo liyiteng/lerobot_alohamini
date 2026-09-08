@@ -142,10 +142,12 @@ python examples/alohamini/teleoperate_bi.py \
   --teleop.arm_profile am-leader-6dof
 ```
 
-The Host runs command, feedback, trajectory shaping, and safety checks at 50 Hz.
-Native teleoperation also defaults to 50 Hz command control while requesting
-camera frames independently at 30 Hz. To expose the non-blocking ROS camera
-stream on TCP port 5557, add `--camera-stream` to the selected Host command.
+The Host runs command handling, feedback, watchdog, and safety checks at 50 Hz.
+Follower servos apply the shared position-mode velocity and acceleration profile,
+so normal teleoperation retains direct target semantics without unbounded motion.
+Native teleoperation also defaults to 50 Hz command control while requesting camera
+frames independently at 30 Hz. To expose the non-blocking ROS camera stream on TCP
+port 5557, add `--camera-stream` to the selected Host command.
 ROS state requests on port 5556 omit camera acquisition, while legacy LeRobot
 clients keep receiving the same state-plus-image multipart response.
 

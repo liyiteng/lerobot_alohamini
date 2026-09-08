@@ -9,121 +9,56 @@ from lerobot.robots.alohamini import alohamini_client as alohamini_client_module
 from lerobot.robots.alohamini.alohamini import AlohaMini
 from lerobot.robots.alohamini.alohamini_client import AlohaMiniClient
 from lerobot.robots.alohamini.alohamini_host import (
-    JointTrajectoryExecutor,
     build_observation_multipart,
     build_robot_metadata,
 )
+from lerobot.robots.alohamini.config_alohamini import AlohaMiniConfig
 from lerobot.robots.alohamini.lift_axis import LiftAxis, LiftAxisConfig
 
 
-def make_executor() -> JointTrajectoryExecutor:
-    return JointTrajectoryExecutor(
-        max_velocity=10.0,
-        max_acceleration=20.0,
-        tracking_error_soft=2.0,
-        tracking_error_hard=5.0,
-    )
+def test_arm_motion_profile_config_rejects_unsafe_register_values() -> None:
+    with pytest.raises(ValueError, match="arm_goal_velocity"):
+        AlohaMiniConfig(arm_goal_velocity=0)
+    with pytest.raises(ValueError, match="arm_acceleration"):
+        AlohaMiniConfig(arm_acceleration=255)
 
 
-def test_trajectory_starts_at_feedback_and_limits_acceleration() -> None:
-    executor = make_executor()
-    executor.set_target({"arm_left_shoulder_pan.pos": 20.0})
+def test_configure_applies_native_arm_motion_profile() -> None:
+    class ConfigBus:
+        def __init__(self) -> None:
+            self.writes = []
 
-    first = executor.step({"arm_left_shoulder_pan.pos": 3.0}, 0.1)
-    second = executor.step({"arm_left_shoulder_pan.pos": first["arm_left_shoulder_pan.pos"]}, 0.1)
+        def disable_torque(self) -> None:
+            pass
 
-    assert first["arm_left_shoulder_pan.pos"] == pytest.approx(3.2)
-    assert second["arm_left_shoulder_pan.pos"] == pytest.approx(3.6)
+        def configure_motors(self) -> None:
+            pass
 
+        def write(self, register, motor, value, **kwargs) -> None:
+            self.writes.append((register, motor, value, kwargs))
 
-def test_tracking_gate_freezes_only_lagging_arm_group() -> None:
-    executor = make_executor()
-    executor.set_target(
-        {
-            "arm_left_shoulder_pan.pos": 20.0,
-            "arm_left_elbow_flex.pos": 20.0,
-            "arm_right_shoulder_pan.pos": 20.0,
-            "arm_left_gripper.pos": 20.0,
-        }
-    )
-    initial = {
-        "arm_left_shoulder_pan.pos": 0.0,
-        "arm_left_elbow_flex.pos": 0.0,
-        "arm_right_shoulder_pan.pos": 0.0,
-        "arm_left_gripper.pos": 0.0,
-    }
-    executor.step(initial, 0.1)
+    bus = ConfigBus()
+    robot = object.__new__(AlohaMini)
+    robot.config = SimpleNamespace(arm_goal_velocity=2000, arm_acceleration=100)
+    robot.left_bus = bus
+    robot.right_bus = None
+    robot.left_arm_motors = ["arm_left_shoulder_pan"]
+    robot.base_motors = []
 
-    measured = {
-        **initial,
-        # Both left body joints share a gate; only one needs to lag.
-        "arm_left_shoulder_pan.pos": -5.0,
-        "arm_left_elbow_flex.pos": 0.2,
-        "arm_right_shoulder_pan.pos": 0.2,
-        "arm_left_gripper.pos": 0.2,
-    }
-    gated = executor.step(measured, 0.1)
+    robot.configure()
 
-    assert gated["arm_left_shoulder_pan.pos"] == pytest.approx(0.2)
-    assert gated["arm_left_elbow_flex.pos"] == pytest.approx(0.2)
-    assert gated["arm_right_shoulder_pan.pos"] > 0.2
-    assert gated["arm_left_gripper.pos"] > 0.2
-    assert executor.last_progress_scale == 0.0
-
-
-def test_hold_discards_pending_target_and_velocity() -> None:
-    executor = make_executor()
-    key = "arm_right_wrist_flex.pos"
-    executor.set_target({key: 20.0})
-    moving = executor.step({key: 0.0}, 0.1)
-
-    executor.hold()
-    held = executor.step({key: moving[key]}, 0.1)
-
-    assert held == moving
-
-
-def test_reversed_target_decelerates_without_command_jump() -> None:
-    executor = make_executor()
-    key = "arm_right_wrist_flex.pos"
-    executor.set_target({key: 20.0})
-    forward = executor.step({key: 0.0}, 0.1)
-
-    executor.set_target({key: -20.0})
-    reversing = executor.step({key: forward[key]}, 0.1)
-
-    assert forward[key] == pytest.approx(0.2)
-    assert reversing[key] == pytest.approx(forward[key])
-
-
-def test_joint_diagnostics_separates_target_command_and_feedback() -> None:
-    executor = make_executor()
-    key = "arm_left_shoulder_pan.pos"
-    executor.set_target({key: 20.0})
-    command = executor.step({key: 3.0}, 0.1)[key]
-
-    diagnostics = executor.joint_diagnostics(
-        {key: 3.0}, {"arm_left_shoulder_pan": -130.0}
-    )["arm_left_shoulder_pan"]
-
-    assert diagnostics == pytest.approx(
-        {
-            "target": 20.0,
-            "command": command,
-            "measured": 3.0,
-            "error": command - 3.0,
-            "velocity": 2.0,
-            "current_ma": -130.0,
-            "progress_scale": 1.0,
-        }
-    )
-
-
-def test_non_position_values_are_not_trajectory_targets() -> None:
-    executor = make_executor()
-    executor.set_target({"x.vel": 1.0, "lift_axis.height_mm": 100.0})
-
-    assert executor.step({}, 0.1) == {}
+    assert (
+        "Goal_Velocity",
+        "arm_left_shoulder_pan",
+        2000,
+        {"normalize": False},
+    ) in bus.writes
+    assert (
+        "Acceleration",
+        "arm_left_shoulder_pan",
+        100,
+        {"normalize": False},
+    ) in bus.writes
 
 
 def test_state_only_observation_has_no_jpeg_frames() -> None:
@@ -149,20 +84,14 @@ def test_state_only_observation_has_no_jpeg_frames() -> None:
     ("include_cameras", "expected"),
     [(True, b"1:camera"), (False, b"1:state")],
 )
-def test_client_observation_token_selects_payload(
-    include_cameras: bool, expected: bytes
-) -> None:
+def test_client_observation_token_selects_payload(include_cameras: bool, expected: bytes) -> None:
     sent = []
     client = object.__new__(AlohaMiniClient)
     client._zmq = SimpleNamespace(NOBLOCK=1, ZMQError=RuntimeError)
     client._observation_request_id = 0
-    client.zmq_observation_socket = SimpleNamespace(
-        send=lambda token, flags: sent.append((token, flags))
-    )
+    client.zmq_observation_socket = SimpleNamespace(send=lambda token, flags: sent.append((token, flags)))
 
-    token = AlohaMiniClient._send_observation_request(
-        client, include_cameras=include_cameras
-    )
+    token = AlohaMiniClient._send_observation_request(client, include_cameras=include_cameras)
 
     assert token == expected
     assert sent == [(expected, 1)]
@@ -226,9 +155,7 @@ def test_control_observation_peeks_camera_cache_without_waiting_for_new_frame() 
 
     assert observation["forward"] == "cached-frame"
     assert camera.max_age_ms == 500
-    assert observation["_host_timing"]["camera_capture_monotonic_s"] == {
-        "forward": 12.5
-    }
+    assert observation["_host_timing"]["camera_capture_monotonic_s"] == {"forward": 12.5}
 
 
 def test_robot_metadata_describes_normalization_and_calibration() -> None:
@@ -242,9 +169,7 @@ def test_robot_metadata_describes_normalization_and_calibration() -> None:
         motors={"arm_left_shoulder_pan": motor},
         calibration={"arm_left_shoulder_pan": calibration},
     )
-    lift = SimpleNamespace(
-        cfg=SimpleNamespace(soft_min_mm=0.0, soft_max_mm=600.0, descent_floor_mm=5.0)
-    )
+    lift = SimpleNamespace(cfg=SimpleNamespace(soft_min_mm=0.0, soft_max_mm=600.0, descent_floor_mm=5.0))
     robot = SimpleNamespace(
         left_bus=left_bus,
         right_bus=None,
@@ -277,9 +202,7 @@ def test_client_lift_target_is_absolute_bounded_and_has_one_control_semantic(
     client = object.__new__(AlohaMiniClient)
     client.teleop_keys = {"lift_up": "u", "lift_down": "j"}
     client.last_remote_state = {"lift_axis.height_mm": 100.0}
-    client.latest_robot_metadata = {
-        "lift_axis": {"soft_min_mm": 0.0, "soft_max_mm": 600.0}
-    }
+    client.latest_robot_metadata = {"lift_axis": {"soft_min_mm": 0.0, "soft_max_mm": 600.0}}
     client.config = SimpleNamespace(
         lift_target_speed_mm_s=150.0,
         lift_target_max_lead_mm=5.0,
@@ -345,6 +268,8 @@ def make_robot_feedback_stub(bus: FakeBus) -> AlohaMini:
     robot._feedback_currents_raw = {"arm_left_elbow_flex": 0.0}
     robot._feedback_positions = {"arm_left_elbow_flex": 1.0}
     robot._joint_current_limit_ma = 1800.0
+    robot._joint_overcurrent_trip_n = 3
+    robot._joint_overcurrent_count = {}
     robot._joint_release_margin = 1.0
     robot._joint_hold_goal = {}
     robot._joint_hold_direction = {}
@@ -373,9 +298,22 @@ def test_current_limiter_keeps_read_through_fallback() -> None:
     assert bus.reads == ["Present_Current", "Present_Position"]
 
 
-def make_gripper_feedback_stub(
-    *, present: float, current_raw: float
-) -> tuple[AlohaMini, FakeBus]:
+def test_joint_current_limiter_ignores_short_current_spikes() -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    robot._feedback_currents_raw["arm_left_elbow_flex"] = 300.0
+    goal = {"arm_left_elbow_flex.pos": 10.0}
+
+    first = robot._limit_joint_goal_by_current(bus, goal)
+    second = robot._limit_joint_goal_by_current(bus, goal)
+    held = robot._limit_joint_goal_by_current(bus, goal)
+
+    assert first == goal
+    assert second == goal
+    assert held == {"arm_left_elbow_flex.pos": 1.0}
+
+
+def make_gripper_feedback_stub(*, present: float, current_raw: float) -> tuple[AlohaMini, FakeBus]:
     bus = FakeBus()
     bus.motors = {"arm_left_gripper": object()}
     robot = object.__new__(AlohaMini)
@@ -393,15 +331,11 @@ def make_gripper_feedback_stub(
 def test_gripper_open_endpoint_overcurrent_releases_on_close_command() -> None:
     robot, bus = make_gripper_feedback_stub(present=90.0, current_raw=100.0)
 
-    held = robot._limit_gripper_goal_by_current(
-        bus, {"arm_left_gripper.pos": 100.0}
-    )
+    held = robot._limit_gripper_goal_by_current(bus, {"arm_left_gripper.pos": 100.0})
     assert held["arm_left_gripper.pos"] == pytest.approx(90.0)
 
     robot._feedback_currents_raw["arm_left_gripper"] = 0.0
-    closing = robot._limit_gripper_goal_by_current(
-        bus, {"arm_left_gripper.pos": 0.0}
-    )
+    closing = robot._limit_gripper_goal_by_current(bus, {"arm_left_gripper.pos": 0.0})
     assert closing["arm_left_gripper.pos"] == pytest.approx(0.0)
     assert robot._gripper_hold_goal == {}
 
@@ -409,14 +343,10 @@ def test_gripper_open_endpoint_overcurrent_releases_on_close_command() -> None:
 def test_gripper_closing_contact_retains_squeeze_and_releases_on_open() -> None:
     robot, bus = make_gripper_feedback_stub(present=30.0, current_raw=100.0)
 
-    held = robot._limit_gripper_goal_by_current(
-        bus, {"arm_left_gripper.pos": 0.0}
-    )
+    held = robot._limit_gripper_goal_by_current(bus, {"arm_left_gripper.pos": 0.0})
     assert held["arm_left_gripper.pos"] == pytest.approx(27.0)
 
     robot._feedback_currents_raw["arm_left_gripper"] = 0.0
-    opening = robot._limit_gripper_goal_by_current(
-        bus, {"arm_left_gripper.pos": 100.0}
-    )
+    opening = robot._limit_gripper_goal_by_current(bus, {"arm_left_gripper.pos": 100.0})
     assert opening["arm_left_gripper.pos"] == pytest.approx(100.0)
     assert robot._gripper_hold_goal == {}

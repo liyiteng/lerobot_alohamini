@@ -30,157 +30,6 @@ from .camera_stream import CameraStreamPublisher
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 
 
-class JointTrajectoryExecutor:
-    """Turn discontinuous joint targets into a gated, acceleration-limited trajectory.
-
-    Body joints share progress within each arm. The two arms and both grippers are gated
-    independently, so one lagging actuator cannot freeze unrelated robot motion.
-    """
-
-    def __init__(
-        self,
-        *,
-        max_velocity: float,
-        max_acceleration: float,
-        tracking_error_soft: float,
-        tracking_error_hard: float,
-    ) -> None:
-        if max_velocity <= 0 or max_acceleration <= 0:
-            raise ValueError("Trajectory velocity and acceleration limits must be positive.")
-        if tracking_error_soft < 0 or tracking_error_hard <= tracking_error_soft:
-            raise ValueError("tracking_error_hard must be greater than tracking_error_soft >= 0.")
-
-        self.max_velocity = float(max_velocity)
-        self.max_acceleration = float(max_acceleration)
-        self.tracking_error_soft = float(tracking_error_soft)
-        self.tracking_error_hard = float(tracking_error_hard)
-        self._target: dict[str, float] = {}
-        self._command: dict[str, float] = {}
-        self._velocity: dict[str, float] = {}
-        self._last_progress_scales: dict[str, float] = {}
-        self.last_tracking_error = 0.0
-        self.last_progress_scale = 1.0
-
-    @staticmethod
-    def _gate_group(key: str) -> str:
-        # Preserve coordinated motion within one arm, without allowing the other arm or
-        # a force-limited gripper to freeze the entire robot trajectory.
-        if key.endswith("_gripper.pos"):
-            return key
-        if key.startswith("arm_left_"):
-            return "arm_left"
-        if key.startswith("arm_right_"):
-            return "arm_right"
-        return key
-
-    def set_target(self, action: dict[str, float]) -> None:
-        for key, value in action.items():
-            if not key.endswith(".pos"):
-                continue
-            value = float(value)
-            if not math.isfinite(value):
-                logging.warning("Ignoring non-finite trajectory target %s=%s", key, value)
-                continue
-            self._target[key] = value
-
-    def hold(self) -> None:
-        """Stop trajectory progress at the last executable command."""
-        self._target = dict(self._command)
-        self._velocity = dict.fromkeys(self._velocity, 0.0)
-
-    def _progress_scales(self, measured: dict[str, float]) -> dict[str, float]:
-        group_errors: dict[str, float] = {}
-        for key, command in self._command.items():
-            if key not in measured:
-                continue
-            group = self._gate_group(key)
-            error = abs(command - float(measured[key]))
-            group_errors[group] = max(group_errors.get(group, 0.0), error)
-
-        self.last_tracking_error = max(group_errors.values(), default=0.0)
-        scales: dict[str, float] = {}
-        for group, error in group_errors.items():
-            if error <= self.tracking_error_soft:
-                scales[group] = 1.0
-            elif error >= self.tracking_error_hard:
-                scales[group] = 0.0
-            else:
-                scales[group] = (self.tracking_error_hard - error) / (
-                    self.tracking_error_hard - self.tracking_error_soft
-                )
-        self._last_progress_scales = scales
-        return scales
-
-    def joint_diagnostics(
-        self,
-        measured: dict[str, float],
-        currents_ma: dict[str, float] | None = None,
-    ) -> dict[str, dict[str, float]]:
-        """Return one coherent target -> command -> feedback snapshot per active joint."""
-        currents_ma = currents_ma or {}
-        diagnostics: dict[str, dict[str, float]] = {}
-        for key, command in sorted(self._command.items()):
-            if key not in measured:
-                continue
-            measured_value = float(measured[key])
-            motor = key.removesuffix(".pos")
-            diagnostics[motor] = {
-                "target": float(self._target.get(key, command)),
-                "command": float(command),
-                "measured": measured_value,
-                "error": float(command) - measured_value,
-                "velocity": float(self._velocity.get(key, 0.0)),
-                "current_ma": float(currents_ma.get(motor, math.nan)),
-                "progress_scale": float(
-                    self._last_progress_scales.get(self._gate_group(key), 1.0)
-                ),
-            }
-        return diagnostics
-
-    def step(self, measured: dict[str, float], dt_s: float) -> dict[str, float]:
-        dt_s = max(0.0, float(dt_s))
-        for key, target in self._target.items():
-            if key not in self._command:
-                # Start at feedback, never at the first possibly discontinuous target.
-                self._command[key] = float(measured.get(key, target))
-                self._velocity[key] = 0.0
-
-        scales = self._progress_scales(measured)
-        self.last_progress_scale = min(scales.values(), default=1.0)
-        if dt_s == 0.0:
-            return dict(self._command)
-
-        acceleration_step = self.max_acceleration * dt_s
-        for key, target in self._target.items():
-            scale = scales.get(self._gate_group(key), 1.0)
-            if scale == 0.0:
-                self._velocity[key] = 0.0
-                continue
-            command = self._command[key]
-            remaining = target - command
-            if remaining == 0.0:
-                self._velocity[key] = 0.0
-                continue
-
-            # The braking-speed bound makes each segment stop at its target without
-            # overshoot, while the acceleration clamp removes velocity discontinuities.
-            braking_speed = math.sqrt(2.0 * self.max_acceleration * abs(remaining))
-            desired_speed = math.copysign(
-                min(self.max_velocity * scale, braking_speed), remaining
-            )
-            velocity = self._velocity[key]
-            velocity += max(-acceleration_step, min(acceleration_step, desired_speed - velocity))
-            delta = velocity * dt_s
-            if delta * remaining > 0.0 and abs(delta) >= abs(remaining):
-                self._command[key] = target
-                self._velocity[key] = 0.0
-            else:
-                self._command[key] = command + delta
-                self._velocity[key] = velocity
-
-        return dict(self._command)
-
-
 class AlohaMiniHost:
     def __init__(self, config: AlohaMiniHostConfig):
         self.zmq_context = zmq.Context()
@@ -199,12 +48,6 @@ class AlohaMiniHost:
         self.connection_time_s = config.connection_time_s
         self.watchdog_timeout_ms = config.watchdog_timeout_ms
         self.max_loop_freq_hz = config.max_loop_freq_hz
-        self.trajectory = JointTrajectoryExecutor(
-            max_velocity=config.trajectory_max_velocity,
-            max_acceleration=config.trajectory_max_acceleration,
-            tracking_error_soft=config.tracking_error_soft,
-            tracking_error_hard=config.tracking_error_hard,
-        )
 
     def disconnect(self):
         self.zmq_observation_socket.close()
@@ -250,9 +93,7 @@ def build_observation_multipart(
         encode_started = time.perf_counter()
         ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         if encoding_timings_ms is not None:
-            encoding_timings_ms[f"encode_{cam_key}"] = (
-                time.perf_counter() - encode_started
-            ) * 1e3
+            encoding_timings_ms[f"encode_{cam_key}"] = (time.perf_counter() - encode_started) * 1e3
         if not ret:
             logging.warning("Failed to JPEG encode camera frame %s.", cam_key)
             continue
@@ -345,15 +186,8 @@ def main():
         const=True,
         default=False,
         help=(
-            "Print average Host, motor, camera, JPEG, and network timings once per second "
-            "(default: false)."
+            "Print average Host, motor, camera, JPEG, and network timings once per second (default: false)."
         ),
-    )
-    parser.add_argument(
-        "--trajectory-max-velocity",
-        type=float,
-        default=None,
-        help="Host arm trajectory velocity limit in configured position units/s.",
     )
     parser.add_argument(
         "--camera-stream",
@@ -366,24 +200,6 @@ def main():
         default=None,
         help="Override the dedicated ROS camera PUB port.",
     )
-    parser.add_argument(
-        "--trajectory-max-acceleration",
-        type=float,
-        default=None,
-        help="Host arm trajectory acceleration limit in configured position units/s^2.",
-    )
-    parser.add_argument(
-        "--tracking-error-soft",
-        type=float,
-        default=None,
-        help="Start slowing an arm group above this command-to-feedback position error.",
-    )
-    parser.add_argument(
-        "--tracking-error-hard",
-        type=float,
-        default=None,
-        help="Freeze only the lagging arm group above this position error.",
-    )
     args = parser.parse_args()
 
     logging.info("Configuring AlohaMini")
@@ -395,7 +211,6 @@ def main():
         logging.info("no_follower mode: follower arms will not connect, only base and lift operate.")
     robot = AlohaMini(robot_config)
 
-
     logging.info("Connecting AlohaMini")
     robot.connect()
     robot_metadata = build_robot_metadata(robot)
@@ -405,15 +220,6 @@ def main():
     host_config.camera_stream_enabled = args.camera_stream
     if args.camera_stream_port is not None:
         host_config.port_zmq_camera_stream = args.camera_stream_port
-    for field_name in (
-        "trajectory_max_velocity",
-        "trajectory_max_acceleration",
-        "tracking_error_soft",
-        "tracking_error_hard",
-    ):
-        cli_value = getattr(args, field_name)
-        if cli_value is not None:
-            setattr(host_config, field_name, cli_value)
     host = AlohaMiniHost(host_config)
     camera_stream = (
         CameraStreamPublisher(
@@ -448,7 +254,8 @@ def main():
     last_cmd_time = time.monotonic()
     watchdog_active = False
     has_received_command = False
-    passthrough_action: dict[str, float] = {}
+    latest_action: dict[str, float] = {}
+    last_sent_action: dict[str, float] = {}
     logging.info("Waiting for commands...")
 
     try:
@@ -460,15 +267,9 @@ def main():
         timing_totals_ms: dict[str, float] = {}
         timing_command_count = 0
         action_timing_totals_ms: dict[str, float] = {}
-        last_control_t = start - 1.0 / host.max_loop_freq_hz
-
         while duration < host.connection_time_s:
             loop_start_t = time.perf_counter()
-            control_dt_s = min(
-                loop_start_t - last_control_t,
-                2.0 / host.max_loop_freq_hz,
-            )
-            last_control_t = loop_start_t
+            command_received = False
 
             # Poll the request before sampling the robot. State-only ROS clients do not
             # put camera retrieval in the control critical path; full LeRobot clients
@@ -485,24 +286,30 @@ def main():
             request_poll_done_t = time.perf_counter()
             include_cameras = observation_request_includes_cameras(request_token)
 
-            # One feedback snapshot owns the complete observe -> trajectory -> act
-            # cycle. send_action() reuses its position/current values for safety limits.
+            # One feedback snapshot owns the complete observe -> act cycle.
+            # send_action() reuses its position/current values for safety limits.
             last_observation = robot.get_observation(include_cameras=include_cameras)
             # send_action() consumes/clears this cycle's cached feedback. Preserve only
             # the small current snapshot needed by the once-per-second tracking report.
             tracking_currents_ma = {
-                motor: float(raw) * 6.5
-                for motor, raw in robot._feedback_currents_raw.items()
+                motor: float(raw) * 6.5 for motor, raw in robot._feedback_currents_raw.items()
             }
             observation_done_t = time.perf_counter()
 
             try:
                 msg = host.zmq_cmd_socket.recv_string(zmq.NOBLOCK)
                 data = dict(json.loads(msg))
-                host.trajectory.set_target(data)
-                passthrough_action = {
-                    key: float(value) for key, value in data.items() if not key.endswith(".pos")
-                }
+                validated_action = {}
+                for key, value in data.items():
+                    numeric_value = float(value)
+                    if not math.isfinite(numeric_value):
+                        logging.warning("Ignoring non-finite action %s=%s", key, value)
+                        continue
+                    validated_action[key] = numeric_value
+                if not validated_action:
+                    raise ValueError("Received command contains no finite numeric action values.")
+                latest_action = validated_action
+                command_received = True
                 has_received_command = True
                 last_cmd_time = time.monotonic()
                 watchdog_active = False
@@ -513,19 +320,32 @@ def main():
             command_done_t = time.perf_counter()
 
             now = time.monotonic()
-            if (now - last_cmd_time > host.watchdog_timeout_ms / 1000) and not watchdog_active:
+            if (
+                has_received_command
+                and now - last_cmd_time > host.watchdog_timeout_ms / 1000
+                and not watchdog_active
+            ):
                 logging.warning(
                     f"Command not received for more than {host.watchdog_timeout_ms} milliseconds. Stopping robot motion."
                 )
                 watchdog_active = True
-                host.trajectory.hold()
-                passthrough_action = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
+                hold_action = {
+                    key: float(value) for key, value in last_observation.items() if key.endswith(".pos")
+                }
+                last_sent_action = robot.send_action(
+                    {
+                        **hold_action,
+                        "x.vel": 0.0,
+                        "y.vel": 0.0,
+                        "theta.vel": 0.0,
+                    }
+                )
                 robot.stop_motion()
+                has_received_command = False
 
             action_sent = False
-            if has_received_command:
-                executable_positions = host.trajectory.step(last_observation, control_dt_s)
-                robot.send_action({**passthrough_action, **executable_positions})
+            if command_received:
+                last_sent_action = robot.send_action(latest_action)
                 action_sent = True
             action_done_t = time.perf_counter()
 
@@ -595,7 +415,7 @@ def main():
             loop_timings_ms = {
                 "command": (command_done_t - observation_done_t) * 1e3,
                 "robot_observation": (observation_done_t - request_poll_done_t) * 1e3,
-                "trajectory_action": (action_done_t - command_done_t) * 1e3,
+                "robot_action": (action_done_t - command_done_t) * 1e3,
                 "request_poll": (request_poll_done_t - loop_start_t) * 1e3,
                 "jpeg_encode": sum(encoding_timings_ms.values()),
                 "response_send": (response_send_done_t - encode_done_t) * 1e3,
@@ -614,9 +434,7 @@ def main():
 
             timing_elapsed_s = loop_done_t - timing_report_start_t
             if args.profile_timing and timing_elapsed_s >= 1.0:
-                averages = {
-                    name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()
-                }
+                averages = {name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()}
                 image_text = " ".join(
                     f"{name}={value:.1f}"
                     for name, value in averages.items()
@@ -625,7 +443,7 @@ def main():
                 print(
                     f"[HOST TIMING avg ms/loop] Hz={timing_loop_count / timing_elapsed_s:.1f} "
                     f"cmd={averages['command']:.1f} robot_obs={averages['robot_observation']:.1f} "
-                    f"trajectory_action={averages['trajectory_action']:.1f} "
+                    f"robot_action={averages['robot_action']:.1f} "
                     f"left={averages.get('left_arm', 0.0):.1f} base={averages.get('base', 0.0):.1f} "
                     f"right={averages.get('right_arm', 0.0):.1f} lift={averages.get('lift', 0.0):.1f} "
                     f"currents={averages.get('currents', 0.0):.1f} {image_text} "
@@ -662,28 +480,25 @@ def main():
                         f"total={action_averages.get('action_total', 0.0):.1f}",
                         flush=True,
                     )
-                print(
-                    f"[HOST TRACKING] max_error={host.trajectory.last_tracking_error:.2f} "
-                    f"min_progress={host.trajectory.last_progress_scale:.2f}",
-                    flush=True,
-                )
-                for motor, values in host.trajectory.joint_diagnostics(
-                    last_observation, tracking_currents_ma
-                ).items():
-                    current_text = (
-                        "n/a"
-                        if math.isnan(values["current_ma"])
-                        else f"{values['current_ma']:+.1f}mA"
-                    )
+                tracking_rows = []
+                for key, command in sorted(last_sent_action.items()):
+                    if not key.endswith(".pos") or key not in last_observation:
+                        continue
+                    measured = float(last_observation[key])
+                    error = float(command) - measured
+                    motor = key.removesuffix(".pos")
+                    tracking_rows.append((motor, float(command), measured, error))
+                max_tracking_error = max((abs(row[3]) for row in tracking_rows), default=0.0)
+                print(f"[HOST TRACKING] max_error={max_tracking_error:.2f}", flush=True)
+                for motor, command, measured, error in tracking_rows:
+                    target = float(latest_action.get(f"{motor}.pos", command))
+                    current = tracking_currents_ma.get(motor)
+                    current_text = "n/a" if current is None else f"{current:+.1f}mA"
                     print(
                         f"[HOST TRACKING][{motor}] "
-                        f"target={values['target']:.2f} "
-                        f"command={values['command']:.2f} "
-                        f"measured={values['measured']:.2f} "
-                        f"error={values['error']:+.2f} "
-                        f"velocity={values['velocity']:+.2f}/s "
-                        f"current={current_text} "
-                        f"progress_scale={values['progress_scale']:.2f}",
+                        f"target={target:.2f} command={command:.2f} "
+                        f"measured={measured:.2f} error={error:+.2f} "
+                        f"current={current_text}",
                         flush=True,
                     )
                 timing_report_start_t = loop_done_t
@@ -706,5 +521,7 @@ def main():
         host.disconnect()
 
     logging.info("Finished AlohaMini cleanly")
+
+
 if __name__ == "__main__":
     main()
