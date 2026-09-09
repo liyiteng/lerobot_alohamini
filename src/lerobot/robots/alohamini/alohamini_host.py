@@ -17,12 +17,16 @@
 import argparse
 import json
 import logging
+import math
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import cv2
 import zmq
 
 from .alohamini import AlohaMini
+from .camera_stream import CameraStreamPublisher
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 
 
@@ -49,7 +53,7 @@ class AlohaMiniHost:
         self.zmq_observation_socket.close()
         self.zmq_cmd_socket.close()
         self.zmq_context.term()
- 
+
 
 def _jsonable(value):
     """Convert numpy scalars to JSON-native values without touching normal Python values."""
@@ -61,8 +65,20 @@ def _jsonable(value):
     return value
 
 
-def build_observation_multipart(observation: dict, camera_keys) -> list[bytes]:
-    """Encode state as JSON and camera images as binary JPEG multipart frames."""
+def build_observation_multipart(
+    observation: dict,
+    camera_keys,
+    encoded_camera_keys=None,
+    encoding_timings_ms: dict[str, float] | None = None,
+) -> list[bytes]:
+    """Encode state as JSON and selected camera images as binary JPEG frames.
+
+    ``camera_keys`` identifies all image fields that must be excluded from JSON.
+    ``encoded_camera_keys`` selects which images to append. Passing an empty iterable
+    produces the strict two-frame ROUTER response required by ROS ``:state`` requests.
+    """
+    camera_keys = tuple(camera_keys)
+    encoded_camera_keys = camera_keys if encoded_camera_keys is None else tuple(encoded_camera_keys)
     state_observation = {
         key: _jsonable(value) for key, value in observation.items() if key not in camera_keys
     }
@@ -70,11 +86,14 @@ def build_observation_multipart(observation: dict, camera_keys) -> list[bytes]:
 
     parts = [json.dumps(state_observation).encode("utf-8")]
     image_names = []
-    for cam_key in camera_keys:
+    for cam_key in encoded_camera_keys:
         frame = observation.get(cam_key)
         if frame is None:
             continue
+        encode_started = time.perf_counter()
         ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if encoding_timings_ms is not None:
+            encoding_timings_ms[f"encode_{cam_key}"] = (time.perf_counter() - encode_started) * 1e3
         if not ret:
             logging.warning("Failed to JPEG encode camera frame %s.", cam_key)
             continue
@@ -84,6 +103,44 @@ def build_observation_multipart(observation: dict, camera_keys) -> list[bytes]:
     state_observation["_images"] = image_names
     parts[0] = json.dumps(state_observation).encode("utf-8")
     return parts
+
+
+def build_robot_metadata(robot: AlohaMini) -> dict:
+    """Describe the connected Host hardware for ROS unit and model validation."""
+    motors = {}
+    for bus in (robot.left_bus, robot.right_bus):
+        if bus is None:
+            continue
+        for name, motor in bus.motors.items():
+            calibration = bus.calibration.get(name)
+            if calibration is None:
+                continue
+            motors[name] = {
+                "id": int(motor.id),
+                "model": motor.model,
+                "normalization": motor.norm_mode.value,
+                "drive_mode": int(calibration.drive_mode),
+                "range_min": int(calibration.range_min),
+                "range_max": int(calibration.range_max),
+            }
+
+    metadata = {
+        "schema_version": 1,
+        "robot_model": robot.config.robot_model,
+        "motors": motors,
+    }
+    if getattr(robot, "lift", None) is not None:
+        metadata["lift_axis"] = {
+            "soft_min_mm": float(robot.lift.cfg.soft_min_mm),
+            "soft_max_mm": float(robot.lift.cfg.soft_max_mm),
+            "descent_floor_mm": float(robot.lift.cfg.descent_floor_mm),
+        }
+    return metadata
+
+
+def observation_request_includes_cameras(request_token: bytes | None) -> bool:
+    """Keep legacy/plain requests full while allowing ROS state-only requests."""
+    return request_token is not None and not request_token.endswith(b":state")
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -129,9 +186,19 @@ def main():
         const=True,
         default=False,
         help=(
-            "Print average Host, motor, camera, JPEG, and network timings once per second "
-            "(default: false)."
+            "Print average Host, motor, camera, JPEG, and network timings once per second (default: false)."
         ),
+    )
+    parser.add_argument(
+        "--camera-stream",
+        action="store_true",
+        help="Publish the optional non-blocking ROS camera stream on port 5557.",
+    )
+    parser.add_argument(
+        "--camera-stream-port",
+        type=int,
+        default=None,
+        help="Override the dedicated ROS camera PUB port.",
     )
     args = parser.parse_args()
 
@@ -144,16 +211,51 @@ def main():
         logging.info("no_follower mode: follower arms will not connect, only base and lift operate.")
     robot = AlohaMini(robot_config)
 
-
     logging.info("Connecting AlohaMini")
     robot.connect()
+    robot_metadata = build_robot_metadata(robot)
 
     logging.info("Starting HostAgent")
     host_config = AlohaMiniHostConfig()
+    host_config.camera_stream_enabled = args.camera_stream
+    if args.camera_stream_port is not None:
+        host_config.port_zmq_camera_stream = args.camera_stream_port
     host = AlohaMiniHost(host_config)
+    camera_stream = (
+        CameraStreamPublisher(
+            robot.cameras,
+            port=host_config.port_zmq_camera_stream,
+            jpeg_quality=host_config.camera_stream_jpeg_quality,
+            max_age_ms=host_config.camera_stream_max_age_ms,
+        )
+        if host_config.camera_stream_enabled and robot.cameras
+        else None
+    )
+    if camera_stream is not None:
+        try:
+            camera_stream.start()
+        except Exception:
+            host.disconnect()
+            robot.disconnect()
+            raise
+        logging.info(
+            "Camera stream publishing on tcp://*:%d",
+            host_config.port_zmq_camera_stream,
+        )
+    jpeg_executor = ThreadPoolExecutor(
+        max_workers=max(1, len(robot.cameras)),
+        thread_name_prefix="alohamini-jpeg",
+    )
+    pending_observation_responses: deque[
+        tuple[bytes, bytes, list[bytes] | Future[list[bytes]], dict[str, float]]
+    ] = deque()
+    max_pending_observation_responses = 8
 
-    last_cmd_time = time.time()
+    last_cmd_time = time.monotonic()
     watchdog_active = False
+    has_received_command = False
+    latest_action: dict[str, float] = {}
+    last_sent_action: dict[str, float] = {}
     logging.info("Waiting for commands...")
 
     try:
@@ -165,18 +267,51 @@ def main():
         timing_totals_ms: dict[str, float] = {}
         timing_command_count = 0
         action_timing_totals_ms: dict[str, float] = {}
-
         while duration < host.connection_time_s:
             loop_start_t = time.perf_counter()
             command_received = False
+
+            # Poll the request before sampling the robot. State-only ROS clients do not
+            # put camera retrieval in the control critical path; full LeRobot clients
+            # still receive the latest frames in their requested cycle.
+            request_identity = None
+            request_token = None
+            if len(pending_observation_responses) < max_pending_observation_responses:
+                try:
+                    request_parts = host.zmq_observation_socket.recv_multipart(flags=zmq.NOBLOCK)
+                    request_identity = request_parts[0]
+                    request_token = request_parts[-1]
+                except zmq.Again:
+                    pass
+            request_poll_done_t = time.perf_counter()
+            include_cameras = observation_request_includes_cameras(request_token)
+
+            # One feedback snapshot owns the complete observe -> act cycle.
+            # send_action() reuses its position/current values for safety limits.
+            last_observation = robot.get_observation(include_cameras=include_cameras)
+            # send_action() consumes/clears this cycle's cached feedback. Preserve only
+            # the small current snapshot needed by the once-per-second tracking report.
+            tracking_currents_ma = {
+                motor: float(raw) * 6.5 for motor, raw in robot._feedback_currents_raw.items()
+            }
+            observation_done_t = time.perf_counter()
+
             try:
                 msg = host.zmq_cmd_socket.recv_string(zmq.NOBLOCK)
                 data = dict(json.loads(msg))
-                #print(f"Received action: {data}")   # debug 
-                _action_sent = robot.send_action(data)
+                validated_action = {}
+                for key, value in data.items():
+                    numeric_value = float(value)
+                    if not math.isfinite(numeric_value):
+                        logging.warning("Ignoring non-finite action %s=%s", key, value)
+                        continue
+                    validated_action[key] = numeric_value
+                if not validated_action:
+                    raise ValueError("Received command contains no finite numeric action values.")
+                latest_action = validated_action
                 command_received = True
-                
-                last_cmd_time = time.time()
+                has_received_command = True
+                last_cmd_time = time.monotonic()
                 watchdog_active = False
             except zmq.Again:
                 pass
@@ -184,41 +319,91 @@ def main():
                 logging.exception("Message fetching failed: %s", e)
             command_done_t = time.perf_counter()
 
-            now = time.time()
-            if (now - last_cmd_time > host.watchdog_timeout_ms / 1000) and not watchdog_active:
+            now = time.monotonic()
+            if (
+                has_received_command
+                and now - last_cmd_time > host.watchdog_timeout_ms / 1000
+                and not watchdog_active
+            ):
                 logging.warning(
                     f"Command not received for more than {host.watchdog_timeout_ms} milliseconds. Stopping robot motion."
                 )
                 watchdog_active = True
+                hold_action = {
+                    key: float(value) for key, value in last_observation.items() if key.endswith(".pos")
+                }
+                last_sent_action = robot.send_action(
+                    {
+                        **hold_action,
+                        "x.vel": 0.0,
+                        "y.vel": 0.0,
+                        "theta.vel": 0.0,
+                    }
+                )
                 robot.stop_motion()
+                has_received_command = False
 
-            
-            last_observation = robot.get_observation()
-            observation_done_t = time.perf_counter()
+            action_sent = False
+            if command_received:
+                last_sent_action = robot.send_action(latest_action)
+                action_sent = True
+            action_done_t = time.perf_counter()
 
-            # Consume at most one request credit per Host loop. Draining all pending
-            # requests here would collapse the client's sliding window back into
-            # stop-and-wait behavior because the discarded tokens never receive replies.
-            request_identity = None
-            request_token = None
-            try:
-                request_parts = host.zmq_observation_socket.recv_multipart(flags=zmq.NOBLOCK)
-                request_identity = request_parts[0]
-                request_token = request_parts[-1]
-            except zmq.Again:
-                pass
-            request_poll_done_t = time.perf_counter()
-
-            encode_done_t = request_poll_done_t
+            encoding_timings_ms: dict[str, float] = {}
             if request_identity is not None and request_token is not None:
-                observation_parts = build_observation_multipart(last_observation, robot.cameras.keys())
-                encode_done_t = time.perf_counter()
+                camera_keys = tuple(robot.cameras.keys())
+                encoded_camera_keys = () if request_token.endswith(b":state") else camera_keys
+                response_observation = {
+                    **last_observation,
+                    "_robot_metadata": robot_metadata,
+                }
+                response_timings_ms: dict[str, float] = {}
+                if encoded_camera_keys:
+                    response_payload = jpeg_executor.submit(
+                        build_observation_multipart,
+                        response_observation,
+                        camera_keys,
+                        encoded_camera_keys,
+                        response_timings_ms,
+                    )
+                else:
+                    response_payload = build_observation_multipart(
+                        response_observation,
+                        camera_keys,
+                        encoded_camera_keys,
+                        response_timings_ms,
+                    )
+                pending_observation_responses.append(
+                    (
+                        request_identity,
+                        request_token,
+                        response_payload,
+                        response_timings_ms,
+                    )
+                )
+
+            encode_done_t = time.perf_counter()
+            while pending_observation_responses:
+                identity, token, payload, response_timings_ms = pending_observation_responses[0]
+                if isinstance(payload, Future):
+                    if not payload.done():
+                        break
+                    try:
+                        observation_parts = payload.result()
+                    except Exception:
+                        logging.exception("JPEG observation encoding failed")
+                        pending_observation_responses.popleft()
+                        continue
+                else:
+                    observation_parts = payload
                 try:
                     host.zmq_observation_socket.send_multipart(
-                        [request_identity, request_token, *observation_parts], flags=zmq.NOBLOCK
+                        [identity, token, *observation_parts], flags=zmq.NOBLOCK
                     )
                 except zmq.Again:
-                    logging.info("Dropping observation response, client is not ready")
+                    break
+                pending_observation_responses.popleft()
+                encoding_timings_ms.update(response_timings_ms)
             response_send_done_t = time.perf_counter()
 
             # Ensure a short sleep to avoid overloading the CPU.
@@ -228,50 +413,60 @@ def main():
             loop_done_t = time.perf_counter()
 
             loop_timings_ms = {
-                "command": (command_done_t - loop_start_t) * 1e3,
-                "robot_observation": (observation_done_t - command_done_t) * 1e3,
-                "request_poll": (request_poll_done_t - observation_done_t) * 1e3,
-                "jpeg_encode": (encode_done_t - request_poll_done_t) * 1e3,
+                "command": (command_done_t - observation_done_t) * 1e3,
+                "robot_observation": (observation_done_t - request_poll_done_t) * 1e3,
+                "robot_action": (action_done_t - command_done_t) * 1e3,
+                "request_poll": (request_poll_done_t - loop_start_t) * 1e3,
+                "jpeg_encode": sum(encoding_timings_ms.values()),
                 "response_send": (response_send_done_t - encode_done_t) * 1e3,
                 "sleep": (loop_done_t - response_send_done_t) * 1e3,
                 "loop": (loop_done_t - loop_start_t) * 1e3,
                 **robot.logs.get("observation_timing_ms", {}),
+                **encoding_timings_ms,
             }
             for name, value_ms in loop_timings_ms.items():
                 timing_totals_ms[name] = timing_totals_ms.get(name, 0.0) + value_ms
             timing_loop_count += 1
-            if command_received:
+            if action_sent:
                 for name, value_ms in robot.logs.get("action_timing_ms", {}).items():
                     action_timing_totals_ms[name] = action_timing_totals_ms.get(name, 0.0) + value_ms
                 timing_command_count += 1
 
             timing_elapsed_s = loop_done_t - timing_report_start_t
             if args.profile_timing and timing_elapsed_s >= 1.0:
-                averages = {
-                    name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()
-                }
-                camera_text = " ".join(
+                averages = {name: total_ms / timing_loop_count for name, total_ms in timing_totals_ms.items()}
+                image_text = " ".join(
                     f"{name}={value:.1f}"
                     for name, value in averages.items()
-                    if name.startswith("camera_")
+                    if name.startswith(("camera_", "encode_"))
                 )
                 print(
                     f"[HOST TIMING avg ms/loop] Hz={timing_loop_count / timing_elapsed_s:.1f} "
                     f"cmd={averages['command']:.1f} robot_obs={averages['robot_observation']:.1f} "
+                    f"robot_action={averages['robot_action']:.1f} "
                     f"left={averages.get('left_arm', 0.0):.1f} base={averages.get('base', 0.0):.1f} "
                     f"right={averages.get('right_arm', 0.0):.1f} lift={averages.get('lift', 0.0):.1f} "
-                    f"currents={averages.get('currents', 0.0):.1f} {camera_text} "
+                    f"currents={averages.get('currents', 0.0):.1f} {image_text} "
                     f"jpeg={averages['jpeg_encode']:.1f} send={averages['response_send']:.1f} "
                     f"sleep={averages['sleep']:.1f} loop={averages['loop']:.1f}",
                     flush=True,
                 )
+                if camera_stream is not None:
+                    camera_stats = camera_stream.stats()
+                    print(
+                        f"[HOST CAMERA STREAM] published={camera_stats['published']:.0f} "
+                        f"dropped={camera_stats['dropped']:.0f} "
+                        f"errors={camera_stats['errors']:.0f} "
+                        f"encode_avg={camera_stats['average_encode_ms']:.1f}ms",
+                        flush=True,
+                    )
                 if timing_command_count:
                     action_averages = {
                         name: total_ms / timing_command_count
                         for name, total_ms in action_timing_totals_ms.items()
                     }
                     print(
-                        f"[HOST ACTION avg ms/command] n={timing_command_count} "
+                        f"[HOST ACTION avg ms/control-cycle] n={timing_command_count} "
                         f"prepare={action_averages.get('action_prepare', 0.0):.1f} "
                         f"lift={action_averages.get('action_lift', 0.0):.1f} "
                         f"relative={action_averages.get('action_relative_limit', 0.0):.1f} "
@@ -283,6 +478,27 @@ def main():
                         f"right_write={action_averages.get('action_right_write', 0.0):.1f} "
                         f"base_write={action_averages.get('action_base_write', 0.0):.1f} "
                         f"total={action_averages.get('action_total', 0.0):.1f}",
+                        flush=True,
+                    )
+                tracking_rows = []
+                for key, command in sorted(last_sent_action.items()):
+                    if not key.endswith(".pos") or key not in last_observation:
+                        continue
+                    measured = float(last_observation[key])
+                    error = float(command) - measured
+                    motor = key.removesuffix(".pos")
+                    tracking_rows.append((motor, float(command), measured, error))
+                max_tracking_error = max((abs(row[3]) for row in tracking_rows), default=0.0)
+                print(f"[HOST TRACKING] max_error={max_tracking_error:.2f}", flush=True)
+                for motor, command, measured, error in tracking_rows:
+                    target = float(latest_action.get(f"{motor}.pos", command))
+                    current = tracking_currents_ma.get(motor)
+                    current_text = "n/a" if current is None else f"{current:+.1f}mA"
+                    print(
+                        f"[HOST TRACKING][{motor}] "
+                        f"target={target:.2f} command={command:.2f} "
+                        f"measured={measured:.2f} error={error:+.2f} "
+                        f"current={current_text}",
                         flush=True,
                     )
                 timing_report_start_t = loop_done_t
@@ -298,9 +514,14 @@ def main():
         print("Keyboard interrupt received. Exiting...")
     finally:
         print("Shutting down AlohaMini Host.")
+        if camera_stream is not None:
+            camera_stream.stop()
+        jpeg_executor.shutdown(wait=True, cancel_futures=True)
         robot.disconnect()
         host.disconnect()
 
     logging.info("Finished AlohaMini cleanly")
+
+
 if __name__ == "__main__":
     main()

@@ -1,11 +1,9 @@
 import argparse
-import inspect
-import os
 import time
 
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
-from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
+from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.so_leader import SOLeaderConfig
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
@@ -14,7 +12,13 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 parser = argparse.ArgumentParser()
 parser.add_argument("--no_robot", action="store_true", help="Do not connect robot, only print actions")
 parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
-parser.add_argument("--fps", type=int, default=30, help="Main loop frequency (frames per second)")
+parser.add_argument("--fps", type=int, default=50, help="Command/control frequency")
+parser.add_argument(
+    "--camera-fps",
+    type=int,
+    default=30,
+    help="Camera request frequency; independent from command/control",
+)
 parser.add_argument(
     "--robot.remote_ip",
     "--remote_ip",
@@ -63,6 +67,11 @@ args = parser.parse_args()
 NO_ROBOT = args.no_robot
 NO_LEADER = args.no_leader
 FPS = args.fps
+CAMERA_FPS = args.camera_fps
+if FPS <= 0 or CAMERA_FPS <= 0:
+    parser.error("--fps and --camera-fps must be positive")
+if CAMERA_FPS > FPS:
+    parser.error("--camera-fps must not exceed --fps")
 # ========================================== #
 
 if NO_ROBOT:
@@ -112,11 +121,19 @@ init_rerun(session_name="alohamini_teleop")
 if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
     print("⚠️ Warning: Some devices are not connected! Still running for debug.")
 
-# Main loop
+# Main loop: 50 Hz command/state control with an independent 30 Hz camera cadence.
+next_camera_request_t = time.perf_counter()
+camera_interval_s = 1.0 / CAMERA_FPS
 while True:
     t0 = time.perf_counter()
 
-    observation = robot.get_observation() if not NO_ROBOT else {}
+    request_cameras = t0 >= next_camera_request_t
+    if request_cameras:
+        while next_camera_request_t <= t0:
+            next_camera_request_t += camera_interval_s
+    observation = (
+        robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
+    )
     arm_actions = leader.get_action() if not NO_LEADER else {}
     arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
     keyboard_keys = keyboard.get_action()
@@ -130,10 +147,3 @@ while True:
         robot.send_action(action)
 
     precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
-    loop_dt = time.perf_counter() - t0
-    loop_fps = 1.0 / loop_dt if loop_dt > 0 else float("inf")
-
-    if NO_ROBOT:
-        print(f"[fps={loop_fps:.1f}] [NO_ROBOT] action → {action}")
-    else:
-        print(f"[fps={loop_fps:.1f}] Sent action → {action}")

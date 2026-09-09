@@ -15,14 +15,11 @@
 # TODO(aliberts, Steven, Pepijn): use gRPC calls instead of zmq?
 
 import base64
-import inspect
 import json
 import logging
 import time
 from collections import deque
 from functools import cached_property
-import os
-from typing import Any
 
 import cv2
 import numpy as np
@@ -34,11 +31,11 @@ from lerobot.utils.errors import DeviceNotConnectedError
 
 from ..robot import Robot
 from .config_alohamini import AlohaMiniClientConfig
-from .model_specs import arm_state_keys_for_robot_model
 from .lift_axis import LiftAxisConfig
+from .model_specs import arm_state_keys_for_robot_model
 
 logging.basicConfig(
-    #level=logging.INFO,  
+    #level=logging.INFO,
     format="[%(filename)s:%(lineno)d] %(message)s"
 )
 
@@ -79,7 +76,11 @@ class AlohaMiniClient(Robot):
         # Incremented only when a new observation message is successfully decoded.
         # Callers can use this to distinguish a fresh remote frame from ``last_frames`` fallback.
         self._observation_sequence = 0
+        self.latest_host_timing: dict = {}
+        self.latest_robot_metadata: dict = {}
         self._lift_target_mm = None
+        self._lift_last_update_t: float | None = None
+        self._lift_direction = 0
 
         # Define three speed levels and a current index
         self.speed_levels = [
@@ -174,11 +175,12 @@ class AlohaMiniClient(Robot):
     def calibrate(self) -> None:
         pass
 
-    def _send_observation_request(self) -> bytes | None:
+    def _send_observation_request(self, *, include_cameras: bool = True) -> bytes | None:
         """Send one observation request without waiting for its response."""
         zmq = self._zmq
         self._observation_request_id += 1
-        request_token = str(self._observation_request_id).encode("ascii")
+        response_kind = "camera" if include_cameras else "state"
+        request_token = f"{self._observation_request_id}:{response_kind}".encode("ascii")
 
         try:
             self.zmq_observation_socket.send(request_token, flags=zmq.NOBLOCK)
@@ -224,19 +226,33 @@ class AlohaMiniClient(Robot):
             return None
         return self._receive_observation_response(request_token, timeout_ms)
 
-    def _fill_observation_request_window(self) -> None:
+    def _fill_observation_request_window(self, *, include_cameras: bool = True) -> None:
         """Keep a bounded number of requests in flight to cover transport latency."""
         while len(self._observation_request_tokens) < self.observation_request_window:
-            request_token = self._send_observation_request()
+            request_token = self._send_observation_request(include_cameras=include_cameras)
             if request_token is None:
                 break
             self._observation_request_tokens.append(request_token)
 
-    def _poll_and_get_latest_message(self) -> list[bytes] | None:
+    def prime_observation_request_window(self, *, include_cameras: bool) -> None:
+        """Drain prefetched responses and refill the window with one payload kind.
+
+        Recording alternates state-only and camera requests. Setup and reset may
+        leave a full window of camera requests in flight; returning those at the
+        start of an episode creates an unintended image burst. Drain the bounded
+        window before establishing the episode's initial state-only pipeline.
+        """
+        while self._observation_request_tokens:
+            request_token = self._observation_request_tokens.popleft()
+            self._receive_observation_response(request_token, self.polling_timeout_ms)
+        self.latest_host_timing = {}
+        self._fill_observation_request_window(include_cameras=include_cameras)
+
+    def _poll_and_get_latest_message(self, *, include_cameras: bool = True) -> list[bytes] | None:
         """Consume the oldest response and replenish the bounded request window."""
 
         if not self._observation_request_tokens:
-            self._fill_observation_request_window()
+            self._fill_observation_request_window(include_cameras=include_cameras)
 
         message = (
             self._receive_observation_response(
@@ -253,7 +269,7 @@ class AlohaMiniClient(Robot):
         else:
             # Replenish before decoding the current frame so Host work and transport overlap
             # JPEG decoding, teleoperation, action sending, and dataset I/O.
-            self._fill_observation_request_window()
+            self._fill_observation_request_window(include_cameras=include_cameras)
         return message
 
     def _parse_observation_json(self, obs_data: str | bytes) -> RobotObservation | None:
@@ -357,12 +373,12 @@ class AlohaMiniClient(Robot):
         #lineno = frame.f_lineno
         #print(f"[{filename}:{lineno}] obs_dict:{obs_dict}")
         #print(f"[{filename}:{frame.f_lineno}] obs_dict:{obs_dict}")
-        
+
         #logging.warning("obs_dict: %s", obs_dict)
 
         return encoded_frames, obs_dict
 
-    def _get_data(self) -> tuple[dict[str, np.ndarray], RobotObservation]:
+    def _get_data(self, *, include_cameras: bool = True) -> tuple[dict[str, np.ndarray], RobotObservation]:
         """
         Polls the video socket for the latest observation data.
 
@@ -374,7 +390,7 @@ class AlohaMiniClient(Robot):
         observation_start_t = time.perf_counter()
 
         # 1. Get the latest message from the socket
-        latest_message_parts = self._poll_and_get_latest_message()
+        latest_message_parts = self._poll_and_get_latest_message(include_cameras=include_cameras)
         receive_done_t = time.perf_counter()
 
         # 2. If no message, return cached data
@@ -396,6 +412,8 @@ class AlohaMiniClient(Robot):
             }
             return self.last_frames, self.last_remote_state
         observation, encoded_frames = parsed
+        self.latest_host_timing = dict(observation.get("_host_timing", {}))
+        self.latest_robot_metadata = dict(observation.get("_robot_metadata", {}))
 
         # 4. Process the valid observation data
         try:
@@ -418,13 +436,13 @@ class AlohaMiniClient(Robot):
         return self.last_frames, new_state
 
     @check_if_not_connected
-    def get_observation(self) -> RobotObservation:
+    def get_observation(self, *, include_cameras: bool = True) -> RobotObservation:
         """
         Capture observations from the remote robot: current follower arm positions,
         present wheel speeds (converted to body-frame velocities: x, y, theta),
         and a camera frame. Receives over ZMQ, translate to body-frame vel
         """
-        frames, obs_dict = self._get_data()
+        frames, obs_dict = self._get_data(include_cameras=include_cameras)
 
         # Always return every configured camera key. Dataset feature construction expects a stable
         # observation schema even if a frame is dropped or a camera has not produced data yet.
@@ -471,7 +489,7 @@ class AlohaMiniClient(Robot):
             "y.vel": y_cmd,
             "theta.vel": theta_cmd,
         }
-    
+
     # lift_axis.vel
     # def _from_keyboard_to_lift_action(self, pressed_keys: np.ndarray):
     #     LIFT_VEL = 1000  # adjust if too slow/fast
@@ -485,29 +503,49 @@ class AlohaMiniClient(Robot):
     #     else:
     #         v = 0.0
     #     return {"lift_axis.vel": int(v)}
-    
+
 
     # lift_axis.height_mm
     def _from_keyboard_to_lift_action(self, pressed_keys: np.ndarray):
         up_pressed = self.teleop_keys.get("lift_up", "u") in pressed_keys
         dn_pressed = self.teleop_keys.get("lift_down", "j") in pressed_keys
-        now_pressed = up_pressed or dn_pressed
+        direction = int(up_pressed) - int(dn_pressed)
 
-        # Read the last height (mm) reported by the Host
+        # Use physical height, not the servo's wrapping single-turn register.
         h_now = float(self.last_remote_state.get("lift_axis.height_mm", 0.0))
+        now = time.monotonic()
+        default_lift_config = LiftAxisConfig()
+        lift_metadata = self.latest_robot_metadata.get("lift_axis", {})
+        soft_min_mm = float(
+            lift_metadata.get("soft_min_mm", default_lift_config.soft_min_mm)
+        )
+        soft_max_mm = float(
+            lift_metadata.get("soft_max_mm", default_lift_config.soft_max_mm)
+        )
 
-        if not now_pressed:
-            return {"lift_axis.height_mm": h_now, "lift_axis.vel": 0}
-
-        step_mm = 50.0
-        if up_pressed and not dn_pressed:
-            target = h_now + step_mm
-        elif dn_pressed and not up_pressed:
-            target = h_now - step_mm
+        # Release, opposing keys, and direction changes re-latch to feedback.
+        if direction == 0:
+            self._lift_target_mm = h_now
         else:
-            target = h_now
+            relatch = self._lift_target_mm is None or direction != self._lift_direction
+            if relatch:
+                self._lift_target_mm = h_now
+            dt = (
+                1.0 / 50.0
+                if self._lift_last_update_t is None or relatch
+                else min(max(now - self._lift_last_update_t, 0.0), 0.1)
+            )
+            self._lift_target_mm += direction * self.config.lift_target_speed_mm_s * dt
+            max_lead_mm = self.config.lift_target_max_lead_mm
+            self._lift_target_mm = min(
+                max(self._lift_target_mm, h_now - max_lead_mm),
+                h_now + max_lead_mm,
+            )
 
-        return {"lift_axis.height_mm": target}
+        self._lift_target_mm = min(max(self._lift_target_mm, soft_min_mm), soft_max_mm)
+        self._lift_last_update_t = now
+        self._lift_direction = direction
+        return {"lift_axis.height_mm": self._lift_target_mm}
 
 
 

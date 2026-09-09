@@ -142,6 +142,15 @@ python examples/alohamini/teleoperate_bi.py \
   --teleop.arm_profile am-leader-6dof
 ```
 
+The Host runs command handling, feedback, watchdog, and safety checks at 50 Hz.
+Follower servos apply the shared position-mode velocity and acceleration profile,
+so normal teleoperation retains direct target semantics without unbounded motion.
+Native teleoperation also defaults to 50 Hz command control while requesting camera
+frames independently at 30 Hz. To expose the non-blocking ROS camera stream on TCP
+port 5557, add `--camera-stream` to the selected Host command.
+ROS state requests on port 5556 omit camera acquisition, while legacy LeRobot
+clients keep receiving the same state-plus-image multipart response.
+
 ---
 
 ## 6. Dataset Recording
@@ -152,6 +161,12 @@ python examples/alohamini/teleoperate_bi.py \
 > Replace `<Pi_IP>` with your Raspberry Pi's IP address.
 > `record_bi.py` prints the local dataset path and uploads to Hugging Face Hub by default. Add `--dataset.push_to_hub=false` to keep the dataset local only.
 > Add `--dataset.root /path/to/dataset` when you want to store or resume from a specific local directory.
+> `record_bi.py` retains the original single-rate behavior: control and dataset
+> sampling both run at `--dataset.fps`. To opt into 50 Hz control with complete,
+> fresh-camera samples at the dataset rate, run the same command with
+> `record_bi_multirate.py`. The multirate recorder may run slightly past the
+> countdown to reach the exact frame count and rejects stalled or misaligned
+> camera data instead of silently writing repeated frames.
 
 ### AlohaMini 1 — SO-ARM leader (5-DoF)
 

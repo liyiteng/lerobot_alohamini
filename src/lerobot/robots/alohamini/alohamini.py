@@ -192,12 +192,13 @@ class AlohaMini(Robot):
         # Nudge the held position slightly further closed than present, so the gripper
         # keeps a bit of squeeze (a small resting current) instead of fully relaxing to 0mA.
         self._gripper_hold_close_step = 3
-        # How far the caller's own goal must move past the held position, in the open
-        # direction, before we treat it as "the user wants to open" and let go.
+        # How far a reversed caller goal must move past the held position before the
+        # contact hold is released.
         self._gripper_release_margin = 1.0
-        # Fixed by mechanical installation, not measured at runtime: +1.0 means increasing
-        # raw position opens the gripper. Flip a motor's sign here if it holds/releases
-        # the wrong way.
+        # Fixed by mechanical installation, not measured at runtime: +1.0 means
+        # increasing raw position opens the gripper. Contact release direction is
+        # inferred from the command that caused current limiting, because either the
+        # closing side or the mechanical open endpoint can produce overcurrent.
         self._gripper_open_direction: dict[str, float] = {
             "arm_left_gripper": 1.0,
             "arm_right_gripper": 1.0,
@@ -211,11 +212,22 @@ class AlohaMini(Robot):
         # depending on the motion, so the retreat direction is inferred per contact
         # episode instead of configured. And unlike the gripper, we don't want to keep
         # nudging force into whatever it hit -- this is collision protection, not grip
-        # force, so it just freezes at the held position.
+        # force, so it just freezes at the held position. Require a short sustained
+        # overcurrent to reject normal acceleration spikes at 50 Hz.
         self._joint_current_limit_ma = 1800.0
+        self._joint_overcurrent_trip_n = 3
+        self._joint_overcurrent_count: dict[str, int] = {}
         self._joint_release_margin = 1.0
         self._joint_hold_goal: dict[str, float] = {}
         self._joint_hold_direction: dict[str, float] = {}
+
+        # Feedback sampled by get_observation() is reused by the following send_action().
+        # This avoids reading the same position/current registers repeatedly in one Host
+        # control cycle. Direct callers that send without observing still use the safe
+        # read-through fallback in send_action().
+        self._feedback_positions: dict[str, float] = {}
+        self._feedback_currents_raw: dict[str, float] = {}
+        self._feedback_lift_height_mm: float | None = None
 
 
     @property
@@ -437,6 +449,18 @@ class AlohaMini(Robot):
         self.left_bus.configure_motors()
         for name in self.left_arm_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+            self.left_bus.write(
+                "Goal_Velocity",
+                name,
+                self.config.arm_goal_velocity,
+                normalize=False,
+            )
+            self.left_bus.write(
+                "Acceleration",
+                name,
+                self.config.arm_acceleration,
+                normalize=False,
+            )
             # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
             self.left_bus.write("P_Coefficient", name, 16)
             # Set I_Coefficient and D_Coefficient to default value 0 and 32
@@ -453,6 +477,18 @@ class AlohaMini(Robot):
             self.right_bus.configure_motors()
             for name in self.right_arm_motors:
                 self.right_bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+                self.right_bus.write(
+                    "Goal_Velocity",
+                    name,
+                    self.config.arm_goal_velocity,
+                    normalize=False,
+                )
+                self.right_bus.write(
+                    "Acceleration",
+                    name,
+                    self.config.arm_acceleration,
+                    normalize=False,
+                )
                 self.right_bus.write("P_Coefficient", name, 16)
                 self.right_bus.write("I_Coefficient", name, 0)
                 self.right_bus.write("D_Coefficient", name, 32)
@@ -615,7 +651,7 @@ class AlohaMini(Robot):
             return 0.0
         
     @check_if_not_connected
-    def get_observation(self) -> RobotObservation:
+    def get_observation(self, *, include_cameras: bool = True) -> RobotObservation:
         # Read actuators position for arm and vel for base
         observation_start_t = time.perf_counter()
         # arm_pos = self.left_bus.sync_read("Present_Position", self.arm_motors)
@@ -650,6 +686,8 @@ class AlohaMini(Robot):
 
         obs_dict = {**left_arm_state, **right_arm_state,**base_vel}
         self.lift.contribute_observation(obs_dict)
+        self._feedback_positions = {**left_pos, **right_pos}
+        self._feedback_lift_height_mm = obs_dict.get("lift_axis.height_mm")
         lift_done_t = time.perf_counter()
         #print(f"Observation dict so far: {obs_dict}")  # debug
 
@@ -657,18 +695,60 @@ class AlohaMini(Robot):
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
         # currents protection
-        self.read_and_check_currents(limit_ma=2000, print_currents=True)
+        self._feedback_currents_raw = self.read_and_check_currents(
+            limit_ma=2000, print_currents=True, raw=True
+        )
         currents_done_t = time.perf_counter()
 
-        # Capture images from cameras
+        # Camera retrieval is outside the state-only control path. Camera drivers keep
+        # their own async capture running; a full observation only fetches the latest
+        # frames when a camera client has actually requested them.
         camera_timings_ms = {}
-        for cam_key, cam in self.cameras.items():
-            camera_start_t = time.perf_counter()
-            obs_dict[cam_key] = cam.async_read()
-            camera_done_t = time.perf_counter()
-            dt_ms = (camera_done_t - camera_start_t) * 1e3
-            camera_timings_ms[f"camera_{cam_key}"] = dt_ms
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+        camera_capture_monotonic_s = {}
+        if include_cameras:
+            for cam_key, cam in self.cameras.items():
+                camera_start_t = time.perf_counter()
+                # Capture runs in one background thread per camera. Host control only
+                # peeks the bounded-age cache; the recorder, not this 50 Hz thread,
+                # decides whether all camera timestamps have advanced.
+                frame = cam.read_latest(max_age_ms=500)
+                capture_timestamp = getattr(cam, "latest_timestamp", None)
+                # Keep the pixel buffer and its capture timestamp from the same
+                # camera-thread update. A frame may arrive between read_latest()
+                # returning and metadata serialization.
+                frame_lock = getattr(cam, "frame_lock", None)
+                if frame_lock is not None:
+                    with frame_lock:
+                        latest_frame = getattr(cam, "latest_frame", None)
+                        latest_timestamp = getattr(cam, "latest_timestamp", None)
+                    if latest_frame is not None and latest_timestamp is not None:
+                        frame = latest_frame
+                        capture_timestamp = latest_timestamp
+                obs_dict[cam_key] = frame
+                if capture_timestamp is not None:
+                    camera_capture_monotonic_s[cam_key] = float(capture_timestamp)
+                camera_done_t = time.perf_counter()
+                dt_ms = (camera_done_t - camera_start_t) * 1e3
+                camera_timings_ms[f"camera_{cam_key}"] = dt_ms
+                logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        clock_reference_monotonic_s = time.perf_counter()
+        clock_reference_unix_ns = time.time_ns()
+        state_sample_midpoint_monotonic_s = (observation_start_t + lift_done_t) / 2.0
+        obs_dict["_host_timing"] = {
+            "state_sample_started_monotonic_s": observation_start_t,
+            "state_sample_finished_monotonic_s": lift_done_t,
+            "state_sample_unix_ns": clock_reference_unix_ns
+            - round(
+                (clock_reference_monotonic_s - state_sample_midpoint_monotonic_s)
+                * 1e9
+            ),
+            "host_clock_reference": {
+                "monotonic_s": clock_reference_monotonic_s,
+                "unix_ns": clock_reference_unix_ns,
+            },
+            "camera_capture_monotonic_s": camera_capture_monotonic_s,
+        }
 
         observation_done_t = time.perf_counter()
         self.logs["observation_timing_ms"] = {
@@ -703,7 +783,9 @@ class AlohaMini(Robot):
         right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_") and self.right_bus is not None and k.replace(".pos", "") in self.right_bus.motors}
 
 
-        base_goal_vel = {k: v for k, v in action.items() if k.endswith(".vel")}
+        base_goal_vel = {
+            key: float(action.get(key, 0.0)) for key in ("x.vel", "y.vel", "theta.vel")
+        }
 
         base_wheel_goal_vel = self._body_to_wheel_raw(
             base_goal_vel["x.vel"], base_goal_vel["y.vel"], base_goal_vel["theta.vel"]
@@ -718,16 +800,30 @@ class AlohaMini(Robot):
         #     arm_safe_goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
         #     arm_goal_pos = arm_safe_goal_pos
 
-        self.lift.apply_action(action)
+        lift_sent = self.lift.apply_action(
+            action, current_height_mm=self._feedback_lift_height_mm
+        )
         lift_action_done_t = time.perf_counter()
 
         if left_pos and self.config.max_relative_target is not None:
-            present_left = self.left_bus.sync_read("Present_Position", self.left_arm_motors)  # left_arm_*
+            present_left = {
+                motor: self._feedback_positions[motor]
+                for motor in self.left_arm_motors
+                if motor in self._feedback_positions
+            }
+            if not all(key.replace(".pos", "") in present_left for key in left_pos):
+                present_left = self.left_bus.sync_read("Present_Position", self.left_arm_motors)
             gp_left = {k: (v, present_left[k.replace(".pos", "")]) for k, v in left_pos.items()}
             left_pos = ensure_safe_goal_position(gp_left, self.config.max_relative_target)
 
         if self.right_bus and right_pos and self.config.max_relative_target is not None:
-            present_right = self.right_bus.sync_read("Present_Position", self.right_arm_motors)
+            present_right = {
+                motor: self._feedback_positions[motor]
+                for motor in self.right_arm_motors
+                if motor in self._feedback_positions
+            }
+            if not all(key.replace(".pos", "") in present_right for key in right_pos):
+                present_right = self.right_bus.sync_read("Present_Position", self.right_arm_motors)
             gp_right = {k: (v, present_right[k.replace(".pos", "")]) for k, v in right_pos.items()}
             right_pos = ensure_safe_goal_position(gp_right, self.config.max_relative_target)
         relative_limit_done_t = time.perf_counter()
@@ -775,7 +871,11 @@ class AlohaMini(Robot):
             "action_total": (base_write_done_t - action_start_t) * 1e3,
         }
 
-        lift_sent = {k: v for k, v in action.items() if k.startswith("lift_axis.")}
+        # A feedback snapshot belongs to exactly one observe -> act cycle.
+        self._feedback_positions.clear()
+        self._feedback_currents_raw.clear()
+        self._feedback_lift_height_mm = None
+
         return {**left_pos, **right_pos, **base_goal_vel, **lift_sent}
 
     def _limit_gripper_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
@@ -794,7 +894,7 @@ class AlohaMini(Robot):
         )
 
     def _limit_joint_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
-        """Freeze an arm joint (not the gripper) once its measured current exceeds the limit."""
+        """Freeze a joint after sustained overcurrent; ignore isolated current spikes."""
         return self._limit_goal_by_current(
             bus,
             goal_pos,
@@ -803,6 +903,8 @@ class AlohaMini(Robot):
             release_margin=self._joint_release_margin,
             hold_goal_state=self._joint_hold_goal,
             hold_direction_state=self._joint_hold_direction,
+            overcurrent_count_state=self._joint_overcurrent_count,
+            overcurrent_trip_n=self._joint_overcurrent_trip_n,
             fixed_direction=None,
             hold_close_step=0.0,
             log_tag="JointCurrentLimit",
@@ -821,26 +923,39 @@ class AlohaMini(Robot):
         fixed_direction: dict[str, float] | None,
         hold_close_step: float,
         log_tag: str,
+        overcurrent_count_state: dict[str, int] | None = None,
+        overcurrent_trip_n: int = 1,
     ) -> dict[str, float]:
         """Freeze a motor's goal once its current exceeds the limit, holding there until the
         caller's own goal asks to move back past the held position.
 
-        fixed_direction is a per-motor mechanical constant (e.g. the gripper's open/close
-        sense, fixed at install time). Pass None for joints that can be pushed into an
-        obstacle from either side -- the retreat direction is then inferred per contact
-        episode from which way the caller was commanding it to move.
+        fixed_direction is a per-motor mechanical constant for deciding whether a
+        gripper command is closing and should retain a small squeeze. The direction
+        that releases any hold is always inferred from the command that caused it, so
+        reversing works after contact at either endpoint.
         """
         target_keys = [key for key in goal_pos if is_target_motor(key) and key.replace(".pos", "") in bus.motors]
         if not target_keys:
             return goal_pos
 
         target_motors = [key.replace(".pos", "") for key in target_keys]
-        try:
-            currents_raw = bus.sync_read("Present_Current", target_motors)
-            present_pos = bus.sync_read("Present_Position", target_motors)
-        except Exception as e:
-            logger.warning("Failed to read %s current/position for force limiting: %s", log_tag, e)
-            return goal_pos
+        currents_raw = {
+            motor: self._feedback_currents_raw[motor]
+            for motor in target_motors
+            if motor in self._feedback_currents_raw
+        }
+        present_pos = {
+            motor: self._feedback_positions[motor]
+            for motor in target_motors
+            if motor in self._feedback_positions
+        }
+        if len(currents_raw) != len(target_motors) or len(present_pos) != len(target_motors):
+            try:
+                currents_raw = bus.sync_read("Present_Current", target_motors)
+                present_pos = bus.sync_read("Present_Position", target_motors)
+            except Exception as e:
+                logger.warning("Failed to read %s current/position for force limiting: %s", log_tag, e)
+                return goal_pos
 
         limited_goal_pos = dict(goal_pos)
         for goal_key in target_keys:
@@ -851,34 +966,56 @@ class AlohaMini(Robot):
 
             if motor not in hold_goal_state:
                 if current_ma < current_limit_ma:
+                    if overcurrent_count_state is not None:
+                        overcurrent_count_state.pop(motor, None)
                     continue
-                if fixed_direction is not None:
-                    # Nudge a small step further in the "closing" sense so a bit of
-                    # position error -- and thus a bit of squeeze current -- remains,
-                    # instead of fully relaxing to 0mA.
-                    direction = fixed_direction.get(motor, 1.0)
-                    hold_goal = min(100.0, max(0.0, present - direction * hold_close_step))
+                if overcurrent_count_state is not None:
+                    count = overcurrent_count_state.get(motor, 0) + 1
+                    overcurrent_count_state[motor] = count
+                    if count < overcurrent_trip_n:
+                        continue
+                    overcurrent_count_state.pop(motor, None)
+                command_delta = goal - present
+                if command_delta > 0.0:
+                    release_direction = -1.0
+                elif command_delta < 0.0:
+                    release_direction = 1.0
                 else:
-                    # No fixed mechanical sense: infer which way it was being pushed and
-                    # hold back away from that direction instead.
-                    command_delta = goal - present
-                    direction = -1.0 if command_delta > 0 else 1.0
+                    release_direction = (
+                        fixed_direction.get(motor, 1.0)
+                        if fixed_direction is not None
+                        else 1.0
+                    )
+                if fixed_direction is not None:
+                    open_direction = fixed_direction.get(motor, 1.0)
+                    is_closing = command_delta * open_direction < 0.0
+                    # Retain a small squeeze only for a closing contact. At the open
+                    # mechanical endpoint, hold at present instead of pushing harder.
+                    hold_goal = (
+                        min(
+                            100.0,
+                            max(0.0, present - open_direction * hold_close_step),
+                        )
+                        if is_closing
+                        else present
+                    )
+                else:
                     hold_goal = present
                 hold_goal_state[motor] = hold_goal
-                hold_direction_state[motor] = direction
+                hold_direction_state[motor] = release_direction
                 print(
                     f"[{log_tag}] {motor}: {current_ma:.1f} mA >= {current_limit_ma:.1f} mA; "
                     f"holding at position {hold_goal:.2f} (present={present:.2f})"
                 )
 
             hold_goal = hold_goal_state[motor]
-            direction = hold_direction_state[motor]
+            release_direction = hold_direction_state[motor]
 
             # Only hand control back once the caller's own goal asks to move past where
             # we're holding, in the direction away from what triggered the hold. Current
             # alone can't signal "let go": holding at/near present already drops the
             # current toward ~0 regardless of whether the object/obstacle is still there.
-            if (goal - hold_goal) * direction >= release_margin:
+            if (goal - hold_goal) * release_direction >= release_margin:
                 hold_goal_state.pop(motor, None)
                 hold_direction_state.pop(motor, None)
                 print(
@@ -903,7 +1040,7 @@ class AlohaMini(Robot):
         self.stop_base()
         self.stop_lift()
 
-    def read_and_check_currents(self, limit_ma, print_currents):
+    def read_and_check_currents(self, limit_ma, print_currents, *, raw: bool = False):
         """Read left/right bus currents (mA), print them, and enforce overcurrent protection"""
         scale = 6.5  # sts3215 current unit conversion factor
         left_curr_raw = {}
@@ -953,7 +1090,10 @@ class AlohaMini(Robot):
             sys.exit(1)
 
 
-        return {k: round(v * scale, 1) for k, v in {**left_curr_raw, **right_curr_raw}.items()}
+        combined_raw = {**left_curr_raw, **right_curr_raw}
+        if raw:
+            return combined_raw
+        return {k: round(v * scale, 1) for k, v in combined_raw.items()}
 
     @check_if_not_connected
     def disconnect(self):

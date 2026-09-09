@@ -154,19 +154,25 @@ class LiftAxis:
         except Exception:
             pass
 
-    def apply_action(self, action: Dict[str, float]) -> None:
+    def apply_action(
+        self, action: Dict[str, float], current_height_mm: float | None = None
+    ) -> Dict[str, float]:
         """
         Supports two action keys:
         - f"{name}.height_mm": target height (mm)  (recommended)
         - f"{name}.vel"      : target velocity     (advanced)
         """
         #print(f"[lift_axis.apply_action] action={action}")  # debug
-        if not self.enabled: return
+        if not self.enabled:
+            return {}
         key_h = f"{self.cfg.name}.height_mm"
         key_v = f"{self.cfg.name}.vel"
         if key_h in action:
-            target_mm = float(action[key_h])
-            cur_mm = self.get_height_mm()
+            target_mm = min(
+                max(float(action[key_h]), self.cfg.soft_min_mm),
+                self.cfg.soft_max_mm,
+            )
+            cur_mm = self.get_height_mm() if current_height_mm is None else current_height_mm
             err = target_mm - cur_mm
             if abs(err) <= self.cfg.on_target_mm:
                 v_cmd = 0
@@ -190,13 +196,14 @@ class LiftAxis:
             ):
                 v_cmd = 0
             self._bus.write("Goal_Velocity", self.cfg.name, int(self.cfg.dir_sign * v_cmd))
-        if key_v in action:
+            return {key_h: target_mm}
+        elif key_v in action:
             # Direct velocity clears height target
             v = int(action[key_v])
             v = max(-self.cfg.v_max, min(self.cfg.v_max, v))
             # Limit if already at boundary
             try:
-                cur_mm = self.get_height_mm()
+                cur_mm = self.get_height_mm() if current_height_mm is None else current_height_mm
                 # Descent floor guard
                 if v < 0 and cur_mm <= self.cfg.descent_floor_mm:
                     print(
@@ -210,10 +217,12 @@ class LiftAxis:
             except Exception:
                 pass
             self._bus.write("Goal_Velocity", self.cfg.name, v * self.cfg.dir_sign)
+            return {key_v: float(v)}
         
         # ticks = int(self._bus.read("Present_Position", self.cfg.name, normalize=False))
         # print(f"[lift_axis] Z-axis ticks: {ticks}")
         # print(f"[lift_axis] Z-axis height: {self.get_height_mm():.2f} mm")
+        return {}
 
     def stop(self) -> None:
         """Stop any ongoing lift motion in velocity mode."""

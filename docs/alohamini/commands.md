@@ -182,6 +182,29 @@ Base and lift only:
 python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2 --no_follower
 ```
 
+ROS-compatible camera publishing is opt-in and does not change the default
+two-camera set. This branch runs Host control at 50 Hz:
+
+```bash
+python -m lerobot.robots.alohamini.alohamini_host \
+  --robot_model alohamini2pro \
+  --camera-stream
+```
+
+The Host uses TCP 5555 for commands, 5556 for observations and metadata, and
+5557 for the optional camera-only stream. Plain 5556 requests retain the legacy
+state-plus-image response; request tokens ending in `:state` return state only.
+Native teleoperation defaults to 50 Hz control and 30 Hz camera requests. These
+can be set explicitly with `--fps 50 --camera-fps 30`. The existing
+`record_bi.py` keeps its original single-rate behavior, where control and
+dataset sampling both use `--dataset.fps`. Use `record_bi_multirate.py` when
+you want 50 Hz control while committing only fresh, timestamp-aligned images,
+state, and action at the dataset rate (normally 30 Hz). The multirate recorder
+collects the requested frame count, so a physical camera running at 29.5 Hz may
+extend wall-clock recording slightly. It stops explicitly if a camera stalls,
+multi-camera skew exceeds 50 ms, state alignment exceeds 100 ms, or the fresh
+frame rate falls below 90% of the requested rate.
+
 ## Teleoperation
 
 Run these on the PC / DGX client after the host is running.
@@ -194,7 +217,8 @@ python examples/alohamini/teleoperate_bi.py \
   --robot.robot_model alohamini1 \
   --teleop.id so101_leader_bi \
   --teleop.arm_profile so-arm-5dof \
-  --fps 30
+  --fps 50 \
+  --camera-fps 30
 ```
 
 AlohaMini 2 / 2 Pro with AM-ARM leader:
@@ -205,7 +229,8 @@ python examples/alohamini/teleoperate_bi.py \
   --robot.robot_model alohamini2 \
   --teleop.id am_leader_bi \
   --teleop.arm_profile am-leader-6dof \
-  --fps 30
+  --fps 50 \
+  --camera-fps 30
 ```
 
 Lower FPS for network or CPU debugging:
@@ -216,7 +241,8 @@ python examples/alohamini/teleoperate_bi.py \
   --robot.robot_model alohamini2 \
   --teleop.id am_leader_bi \
   --teleop.arm_profile am-leader-6dof \
-  --fps 10
+  --fps 10 \
+  --camera-fps 10
 ```
 
 ## Recording
@@ -224,6 +250,19 @@ python examples/alohamini/teleoperate_bi.py \
 `record_bi.py` prints the local dataset path after setup and finalization, and uploads to Hugging Face Hub by default.
 Add `--dataset.push_to_hub=false` if you only want to keep the dataset locally.
 Add `--dataset.root /path/to/dataset` when you want to store or resume from a specific local directory.
+
+For optional 50 Hz control with fresh camera frames at `--dataset.fps`, use the
+same arguments with the multirate entry point:
+
+```bash
+python examples/alohamini/record_bi_multirate.py \
+  --dataset.repo_id $HF_USER/alohamini_multirate_test \
+  --dataset.fps 30 \
+  --robot.remote_ip <Pi_IP> \
+  --robot.robot_model alohamini2pro \
+  --teleop.id am_leader_bi \
+  --teleop.arm_profile am-leader-6dof
+```
 
 Create a dataset for AlohaMini 1:
 
