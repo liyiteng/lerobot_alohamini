@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from itertools import chain
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 
@@ -297,6 +298,9 @@ class AlohaMini(Robot):
         self._joint_hold_direction: dict[str, float] = {}
         self._arm_goal_positions: dict[str, float] = {}
         self._arm_sent_positions: dict[str, float] = {}
+        self._arm_sent_at: float | None = None
+        self._joint_hold_events = 0
+        self._safety_session_id = uuid4().hex
         self._last_currents_log_t = 0.0
 
     @property
@@ -911,12 +915,14 @@ class AlohaMini(Robot):
         if left_pos:
             self.left_bus.sync_write("Goal_Position", {k.replace(".pos", ""): v for k, v in left_pos.items()})
             self._arm_sent_positions.update(left_pos)
+            self._arm_sent_at = time.monotonic()
         left_write_done_t = time.perf_counter()
         if self.right_bus and right_pos:
             self.right_bus.sync_write(
                 "Goal_Position", {k.replace(".pos", ""): v for k, v in right_pos.items()}
             )
             self._arm_sent_positions.update(right_pos)
+            self._arm_sent_at = time.monotonic()
         right_write_done_t = time.perf_counter()
         self.left_bus.sync_write("Goal_Velocity", base_wheel_goal_vel)
         base_write_done_t = time.perf_counter()
@@ -963,8 +969,23 @@ class AlohaMini(Robot):
                     "Goal_Position", {key.removesuffix(".pos"): value for key, value in changed.items()}
                 )
                 self._arm_sent_positions.update(changed)
+                self._arm_sent_at = time.monotonic()
                 corrections.update(changed)
         return corrections
+
+    def get_safety_status(self) -> dict[str, Any]:
+        """Snapshot protection and accepted arm targets without bus I/O."""
+        return {
+            "version": 1,
+            "host_session_id": self._safety_session_id,
+            "sampled_at_monotonic_s": time.monotonic(),
+            "joint_hold_events": self._joint_hold_events,
+            "joint_holds": dict(self._joint_hold_goal),
+            "gripper_holds": dict(self._gripper_hold_goal),
+            "requested_targets": dict(self._arm_goal_positions),
+            "accepted_targets": dict(self._arm_sent_positions),
+            "accepted_at_monotonic_s": self._arm_sent_at,
+        }
 
     def _limit_gripper_goal_by_current(
         self, bus: FeetechMotorsBus, goal_pos: dict[str, float]
@@ -1091,6 +1112,7 @@ class AlohaMini(Robot):
                     continue
 
                 self._joint_hold_goal[motor] = present
+                self._joint_hold_events += 1
                 self._joint_hold_direction[motor] = -command_direction
                 self._joint_stall_candidates.pop(motor, None)
                 logger.warning(

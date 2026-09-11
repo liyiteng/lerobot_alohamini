@@ -20,6 +20,7 @@ import logging
 import time
 from collections import deque
 from functools import cached_property
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -35,9 +36,10 @@ from .lift_axis import LiftAxisConfig
 from .model_specs import arm_state_keys_for_robot_model
 
 logging.basicConfig(
-    #level=logging.INFO,
+    # level=logging.INFO,
     format="[%(filename)s:%(lineno)d] %(message)s"
 )
+
 
 class AlohaMiniClient(Robot):
     config_class = AlohaMiniClientConfig
@@ -69,6 +71,10 @@ class AlohaMiniClient(Robot):
         self.zmq_observation_socket = None
         self._observation_request_tokens: deque[bytes] = deque()
         self._observation_request_id = 0
+        self._request_times: dict[bytes, float] = {}
+        self._response_requested_at: float | None = None
+        self._feedback_valid = False
+        self._feedback_requested_at: float | None = None
 
         self.last_frames = {}
 
@@ -78,6 +84,11 @@ class AlohaMiniClient(Robot):
         self._observation_sequence = 0
         self.latest_host_timing: dict = {}
         self.latest_robot_metadata: dict = {}
+        self.latest_safety_status: dict = {}
+        self._last_safety_received_at: float | None = None
+        self._client_id = uuid4().hex
+        self._command_sequence = 0
+        self.last_sent_command: dict = {}
         self._lift_target_mm = None
         self._lift_last_update_t: float | None = None
         self._lift_direction = 0
@@ -144,12 +155,24 @@ class AlohaMiniClient(Robot):
     @check_if_already_connected
     def connect(self) -> None:
         """Establishes ZMQ sockets with the remote mobile robot"""
+        try:
+            self._connect()
+        except BaseException:
+            if self.zmq_observation_socket is not None:
+                self.zmq_observation_socket.close(linger=0)
+            if self.zmq_cmd_socket is not None:
+                self.zmq_cmd_socket.close(linger=0)
+            if self.zmq_context is not None:
+                self.zmq_context.term()
+            raise
 
+    def _connect(self) -> None:
         zmq = self._zmq
         self.zmq_context = zmq.Context()
         self.zmq_cmd_socket = self.zmq_context.socket(zmq.PUSH)
         # Socket options that control queueing must be set before connect().
         self.zmq_cmd_socket.setsockopt(zmq.CONFLATE, 1)
+        self.zmq_cmd_socket.setsockopt(zmq.LINGER, 0)
         zmq_cmd_locator = f"tcp://{self.remote_ip}:{self.port_zmq_cmd}"
         self.zmq_cmd_socket.connect(zmq_cmd_locator)
 
@@ -158,12 +181,19 @@ class AlohaMiniClient(Robot):
         self.zmq_observation_socket = self.zmq_context.socket(zmq.DEALER)
         self.zmq_observation_socket.setsockopt(zmq.RCVHWM, self.observation_request_window)
         self.zmq_observation_socket.setsockopt(zmq.SNDHWM, self.observation_request_window)
+        self.zmq_observation_socket.setsockopt(zmq.LINGER, 0)
         zmq_observations_locator = f"tcp://{self.remote_ip}:{self.port_zmq_observations}"
         self.zmq_observation_socket.connect(zmq_observations_locator)
 
         handshake_message = self._request_observation(self.connect_timeout_s * 1000)
         if handshake_message is None:
             raise DeviceNotConnectedError("Timeout waiting for AlohaMini Host to connect expired.")
+
+        # Learn ownership before the first command, without treating handshake images as fresh frames.
+        handshake_state = self._parse_observation_json(handshake_message[0])
+        if isinstance(handshake_state, dict):
+            self.latest_safety_status = dict(handshake_state.get("_safety", {}))
+            self._last_safety_received_at = time.monotonic() if self.latest_safety_status else None
 
         # The handshake proves that the Host is available, but it may become stale while
         # the remaining teleoperation devices connect. Discard it and fill a bounded request
@@ -181,6 +211,12 @@ class AlohaMiniClient(Robot):
         self._observation_request_id += 1
         response_kind = "camera" if include_cameras else "state"
         request_token = f"{self._observation_request_id}:{response_kind}".encode("ascii")
+        self._request_times = {
+            token: stamp
+            for token, stamp in self._request_times.items()
+            if token in self._observation_request_tokens
+        }
+        self._request_times[request_token] = time.monotonic()
 
         try:
             self.zmq_observation_socket.send(request_token, flags=zmq.NOBLOCK)
@@ -189,9 +225,7 @@ class AlohaMiniClient(Robot):
             return None
         return request_token
 
-    def _receive_observation_response(
-        self, request_token: bytes, timeout_ms: int
-    ) -> list[bytes] | None:
+    def _receive_observation_response(self, request_token: bytes, timeout_ms: int) -> list[bytes] | None:
         """Wait for one token-matched response and discard responses to older requests."""
         zmq = self._zmq
 
@@ -217,6 +251,7 @@ class AlohaMiniClient(Robot):
                 except zmq.Again:
                     break
                 if response and response[0] == request_token:
+                    self._response_requested_at = self._request_times.pop(request_token, None)
                     return response[1:]
 
     def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
@@ -328,9 +363,7 @@ class AlohaMiniClient(Robot):
                     continue
                 decode_start_t = time.perf_counter()
                 frame = self._decode_image_from_b64(image_b64)
-                decode_timings_ms[f"decode_{cam_name}"] = (
-                    time.perf_counter() - decode_start_t
-                ) * 1e3
+                decode_timings_ms[f"decode_{cam_name}"] = (time.perf_counter() - decode_start_t) * 1e3
                 if frame is not None:
                     encoded_frames[cam_name] = frame
         else:
@@ -346,9 +379,7 @@ class AlohaMiniClient(Robot):
                     continue
                 decode_start_t = time.perf_counter()
                 frame = self._decode_image_from_jpeg_bytes(message_parts[index + 1])
-                decode_timings_ms[f"decode_{cam_name}"] = (
-                    time.perf_counter() - decode_start_t
-                ) * 1e3
+                decode_timings_ms[f"decode_{cam_name}"] = (time.perf_counter() - decode_start_t) * 1e3
                 if frame is not None:
                     encoded_frames[cam_name] = frame
 
@@ -365,16 +396,21 @@ class AlohaMiniClient(Robot):
     ) -> tuple[dict[str, np.ndarray], RobotObservation]:
         """Extracts frames, and state from the parsed observation."""
 
-        flat_state = {key: observation.get(key, 0.0) for key in self._state_order}
+        metadata = observation.get("_robot_metadata", {})
+        if metadata and metadata.get("robot_model") != self.config.robot_model:
+            raise ValueError("Host robot_model does not match the client configuration")
+        flat_state = {key: float(observation[key]) for key in self._state_order}
+        if not all(np.isfinite(value) for value in flat_state.values()):
+            raise ValueError("Host feedback contains non-finite state values")
 
         state_vec = np.array([flat_state[key] for key in self._state_order], dtype=np.float32)
 
         obs_dict: RobotObservation = {**flat_state, OBS_STATE: state_vec}
-        #lineno = frame.f_lineno
-        #print(f"[{filename}:{lineno}] obs_dict:{obs_dict}")
-        #print(f"[{filename}:{frame.f_lineno}] obs_dict:{obs_dict}")
+        # lineno = frame.f_lineno
+        # print(f"[{filename}:{lineno}] obs_dict:{obs_dict}")
+        # print(f"[{filename}:{frame.f_lineno}] obs_dict:{obs_dict}")
 
-        #logging.warning("obs_dict: %s", obs_dict)
+        # logging.warning("obs_dict: %s", obs_dict)
 
         return encoded_frames, obs_dict
 
@@ -388,6 +424,7 @@ class AlohaMiniClient(Robot):
         """
 
         observation_start_t = time.perf_counter()
+        self._feedback_valid = False
 
         # 1. Get the latest message from the socket
         latest_message_parts = self._poll_and_get_latest_message(include_cameras=include_cameras)
@@ -401,6 +438,10 @@ class AlohaMiniClient(Robot):
             }
             return self.last_frames, self.last_remote_state
 
+        requested_at = self._response_requested_at
+        if requested_at is None or time.monotonic() - requested_at > 0.25:
+            return self.last_frames, self.last_remote_state
+
         # 3. Parse the observation message
         parsed = self._parse_observation_message(latest_message_parts)
         parse_done_t = time.perf_counter()
@@ -412,11 +453,15 @@ class AlohaMiniClient(Robot):
             }
             return self.last_frames, self.last_remote_state
         observation, encoded_frames = parsed
-        self.latest_host_timing = dict(observation.get("_host_timing", {}))
-        self.latest_robot_metadata = dict(observation.get("_robot_metadata", {}))
 
         # 4. Process the valid observation data
         try:
+            for key in ("_host_timing", "_robot_metadata", "_safety"):
+                if not isinstance(observation.get(key, {}), dict):
+                    raise ValueError(f"Invalid Host metadata: {key}")
+            timeout = observation.get("_safety", {}).get("command_watchdog_timeout_s", 1.0)
+            if not isinstance(timeout, (int, float)) or not np.isfinite(timeout) or timeout <= 0:
+                raise ValueError("Invalid Host watchdog timeout")
             new_frames, new_state = self._remote_state_from_obs(observation, encoded_frames)
         except Exception as e:
             logging.error(f"Error processing observation data, serving last observation: {e}")
@@ -424,7 +469,19 @@ class AlohaMiniClient(Robot):
 
         self.last_frames = {**self.last_frames, **new_frames}
         self.last_remote_state = new_state
+        self.latest_host_timing = dict(observation.get("_host_timing", {}))
+        # A failed JPEG decode must not stamp a cached image as a fresh capture.
+        self.latest_host_timing["camera_capture_monotonic_s"] = {
+            name: timestamp
+            for name, timestamp in self.latest_host_timing.get("camera_capture_monotonic_s", {}).items()
+            if name in new_frames
+        }
+        self.latest_robot_metadata = dict(observation.get("_robot_metadata", {}))
+        self.latest_safety_status = dict(observation.get("_safety", {}))
+        self._last_safety_received_at = time.monotonic() if self.latest_safety_status else None
         self._observation_sequence += 1
+        self._feedback_requested_at = requested_at
+        self._feedback_valid = True
         observation_done_t = time.perf_counter()
         self.logs["observation_timing_ms"] = {
             "obs_wait": (receive_done_t - observation_start_t) * 1e3,
@@ -452,7 +509,6 @@ class AlohaMiniClient(Robot):
                 logging.warning("Frame is None for %s; using zeros.", cam_name)
                 frame = np.zeros((height, width, channels), dtype=np.uint8)
             obs_dict[cam_name] = frame
-
 
         return obs_dict
 
@@ -483,7 +539,6 @@ class AlohaMiniClient(Robot):
         if self.teleop_keys["rotate_right"] in pressed_keys:
             theta_cmd -= theta_speed
 
-
         return {
             "x.vel": x_cmd,
             "y.vel": y_cmd,
@@ -504,7 +559,6 @@ class AlohaMiniClient(Robot):
     #         v = 0.0
     #     return {"lift_axis.vel": int(v)}
 
-
     # lift_axis.height_mm
     def _from_keyboard_to_lift_action(self, pressed_keys: np.ndarray):
         up_pressed = self.teleop_keys.get("lift_up", "u") in pressed_keys
@@ -516,12 +570,8 @@ class AlohaMiniClient(Robot):
         now = time.monotonic()
         default_lift_config = LiftAxisConfig()
         lift_metadata = self.latest_robot_metadata.get("lift_axis", {})
-        soft_min_mm = float(
-            lift_metadata.get("soft_min_mm", default_lift_config.soft_min_mm)
-        )
-        soft_max_mm = float(
-            lift_metadata.get("soft_max_mm", default_lift_config.soft_max_mm)
-        )
+        soft_min_mm = float(lift_metadata.get("soft_min_mm", default_lift_config.soft_min_mm))
+        soft_max_mm = float(lift_metadata.get("soft_max_mm", default_lift_config.soft_max_mm))
 
         # Release, opposing keys, and direction changes re-latch to feedback.
         if direction == 0:
@@ -547,9 +597,6 @@ class AlohaMiniClient(Robot):
         self._lift_direction = direction
         return {"lift_axis.height_mm": self._lift_target_mm}
 
-
-
-
     def configure(self):
         pass
 
@@ -566,7 +613,27 @@ class AlohaMiniClient(Robot):
         Returns:
             np.ndarray: the action sent to the motors, potentially clipped.
         """
-        self.zmq_cmd_socket.send_string(json.dumps(action))  # action is in motor space
+        if not self.command_permitted or not self.feedback_fresh:
+            return {}
+        payload = dict(action)
+        if not payload or any(
+            key not in self._state_order or not np.isfinite(value) for key, value in payload.items()
+        ):
+            raise ValueError("Action must contain only known, finite actuator targets")
+        command = {}
+        if self.latest_safety_status.get("version") == 1:
+            self._command_sequence += 1
+            command = {"client_id": self._client_id, "sequence": self._command_sequence}
+            if "control_owner" in self.latest_safety_status:
+                command["host_session_id"] = self.latest_safety_status["host_session_id"]
+            if "control_epoch" in self.latest_safety_status:
+                command["control_epoch"] = self.latest_safety_status["control_epoch"]
+            payload["_command"] = command
+        try:
+            self.zmq_cmd_socket.send_string(json.dumps(payload), flags=self._zmq.NOBLOCK)
+        except self._zmq.Again:
+            return {}
+        self.last_sent_command = command
 
         # TODO(Steven): Remove the np conversion when it is possible to record a non-numpy array value
         actions = np.array([action.get(k, 0.0) for k in self._state_order], dtype=np.float32)
@@ -575,11 +642,26 @@ class AlohaMiniClient(Robot):
         action_sent[ACTION] = actions
         return action_sent
 
+    @property
+    def feedback_fresh(self) -> bool:
+        timeout = min(0.25, self.latest_safety_status.get("command_watchdog_timeout_s", 0.25))
+        return (
+            self._feedback_valid
+            and self._feedback_requested_at is not None
+            and time.monotonic() - self._feedback_requested_at < timeout
+        )
+
+    @property
+    def command_permitted(self) -> bool:
+        return self.latest_safety_status.get("control_owner") in (None, self._client_id)
+
     @check_if_not_connected
     def disconnect(self):
         """Cleans ZMQ comms"""
 
         self._observation_request_tokens.clear()
+        self._request_times.clear()
+        self._feedback_valid = False
         self.zmq_observation_socket.close()
         self.zmq_cmd_socket.close()
         self.zmq_context.term()

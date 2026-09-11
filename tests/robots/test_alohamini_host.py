@@ -93,6 +93,8 @@ def test_client_observation_token_selects_payload(include_cameras: bool, expecte
     client = object.__new__(AlohaMiniClient)
     client._zmq = SimpleNamespace(NOBLOCK=1, ZMQError=RuntimeError)
     client._observation_request_id = 0
+    client._request_times = {}
+    client._observation_request_tokens = []
     client.zmq_observation_socket = SimpleNamespace(send=lambda token, flags: sent.append((token, flags)))
 
     token = AlohaMiniClient._send_observation_request(client, include_cameras=include_cameras)

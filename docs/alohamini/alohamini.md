@@ -169,6 +169,18 @@ Sustained overload stops the robot after 650 ms; near-stall current stops it aft
 80 ms. Durations use elapsed time; detection occurs on the next feedback sample.
 The gripper's separate 0.5 A threshold controls contact force.
 
+The Host grants control to the first command client and rejects other writers.
+After that client stops sending for the watchdog interval (1 second by default),
+the Host stops motion before releasing control. Stop the current controller and
+wait for release before starting another. State-only observers do not acquire
+control. Updated clients identify commands and bind them to the Host session and
+control epoch. Upgrade the Host and command clients together. Identified commands
+without the current epoch are rejected. PC commands require complete feedback
+from a request sent within the last 250 ms; a missing response stops new commands.
+Legacy unidentified commands remain supported as one shared legacy controller;
+do not run multiple legacy command clients together.
+Legacy commands cannot provide session/epoch replay protection.
+
 ---
 
 ## 6. Dataset Recording
