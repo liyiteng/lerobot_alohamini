@@ -201,7 +201,8 @@ class RTCInferenceEngine(InferenceEngine):
         if self._rtc_thread is not None and self._rtc_thread.is_alive():
             self._rtc_thread.join(timeout=_RTC_JOIN_TIMEOUT_S)
             if self._rtc_thread.is_alive():
-                logger.warning("RTC thread did not join within %.1fs", _RTC_JOIN_TIMEOUT_S)
+                logger.warning("RTC thread did not stop within %.1fs", _RTC_JOIN_TIMEOUT_S)
+                return
             else:
                 logger.info("RTC inference thread stopped")
             self._rtc_thread = None
