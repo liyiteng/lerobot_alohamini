@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import json
 import logging
 import shutil
 import tempfile
@@ -94,7 +95,6 @@ def _encode_video_worker(
         encoder_threads=encoder_threads,
         overwrite=True,
     )
-    shutil.rmtree(img_dir)
     return temp_path
 
 
@@ -152,6 +152,8 @@ class DatasetWriter:
         self._episodes_since_last_encoding: int = 0
         self._recorded_frames: int = initial_frames
         self._finalized = False
+        self.save_failed = False
+        self._commit_started = False
 
     def _create_episode_buffer(self, episode_index: int | None = None) -> dict:
         current_ep_idx = self._meta.total_episodes if episode_index is None else episode_index
@@ -183,6 +185,24 @@ class DatasetWriter:
             self.image_writer.save_image(image=image, fpath=fpath, compress_level=compress_level)
 
     def add_frame(self, frame: dict) -> None:
+        """Append one complete frame, rolling back buffer columns on submission failure."""
+        if self.save_failed:
+            raise RuntimeError("Recover the failed episode save before adding frames")
+        if self.episode_buffer is None:
+            self.episode_buffer = self._create_episode_buffer()
+        lengths = {
+            key: len(values) for key, values in self.episode_buffer.items() if isinstance(values, list)
+        }
+        size = self.episode_buffer["size"]
+        try:
+            self._add_frame(frame)
+        except BaseException:
+            for key, length in lengths.items():
+                del self.episode_buffer[key][length:]
+            self.episode_buffer["size"] = size
+            raise
+
+    def _add_frame(self, frame: dict) -> None:
         """
         Add a single frame to the current episode buffer.
 
@@ -257,7 +277,29 @@ class DatasetWriter:
         parallel_encoding: bool = True,
     ) -> None:
         """Save the current episode in self.episode_buffer to disk."""
-        episode_buffer = episode_data if episode_data is not None else self.episode_buffer
+        if self.save_failed and self._commit_started:
+            raise RuntimeError("Episode commit failed; recover meta/recovery before appending or retrying")
+        source = episode_data if episode_data is not None else self.episode_buffer
+        validate_episode_buffer(source, self._meta.total_episodes, self._meta.features)
+        recovery_path = self._root / "meta" / "recovery" / f"episode_{source['episode_index']:06d}.json"
+        self.save_failed = False
+        self._commit_started = False
+        try:
+            recovery_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", dir=recovery_path.parent, delete=False) as stream:
+                temp_path = Path(stream.name)
+                json.dump(source, stream, default=lambda value: value.tolist())
+            temp_path.replace(recovery_path)
+            self._save_episode(episode_data, parallel_encoding)
+        except BaseException:
+            self.save_failed = True
+            logger.exception("Episode save failed; preserving buffer, images and %s", recovery_path)
+            raise
+        recovery_path.unlink()
+
+    def _save_episode(self, episode_data: dict | None, parallel_encoding: bool) -> None:
+        # Replacing fields and popping bookkeeping must never mutate the recoverable buffer.
+        episode_buffer = dict(episode_data if episode_data is not None else self.episode_buffer)
 
         validate_episode_buffer(episode_buffer, self._meta.total_episodes, self._meta.features)
 
@@ -291,6 +333,13 @@ class DatasetWriter:
         # Wait for image writer to end, so that episode stats over images can be computed
         self._wait_image_writer()
 
+        for key in self._meta.image_keys + self._meta.video_keys:
+            for image_path in episode_buffer[key]:
+                if image_path is not None and (
+                    not Path(image_path).is_file() or Path(image_path).stat().st_size == 0
+                ):
+                    raise OSError(f"Image write did not complete: {image_path}")
+
         has_video_keys = len(self._meta.video_keys) > 0
         use_streaming = self._streaming_encoder is not None and has_video_keys
         use_batched_encoding = self._batch_encoding_size > 1
@@ -306,6 +355,7 @@ class DatasetWriter:
         else:
             ep_stats = compute_episode_stats(episode_buffer, self._meta.features)
 
+        self._commit_started = True
         ep_metadata = self._save_episode_data(episode_buffer)
 
         if use_streaming:
@@ -370,6 +420,11 @@ class DatasetWriter:
 
         if episode_data is None:
             self.clear_episode_buffer(delete_images=len(self._meta.image_keys) > 0)
+        if has_video_keys and not use_batched_encoding:
+            for key in self._meta.video_keys:
+                image_dir = self._get_image_file_dir(episode_index, key)
+                if image_dir.exists():
+                    shutil.rmtree(image_dir)
 
     def _batch_save_episode_video(self, start_episode: int, end_episode: int | None = None) -> None:
         """Batch save videos for multiple episodes."""
@@ -415,6 +470,10 @@ class DatasetWriter:
             episode_df = episode_df.combine_first(video_ep_df)
             episode_df.to_parquet(episode_df_path)
             self._meta.episodes = load_episodes(self._root)
+            for key in self._meta.video_keys:
+                image_dir = self._get_image_file_dir(ep_idx, key)
+                if image_dir.exists():
+                    shutil.rmtree(image_dir)
 
     def _save_episode_data(self, episode_buffer: dict) -> dict:
         """Save episode data to a parquet file."""
@@ -679,7 +738,8 @@ class DatasetWriter:
             self.image_writer.stop()
             self.image_writer = None
         # 2. Flush pending video encoding (streaming or batch)
-        self.flush_pending_videos()
+        if not self.save_failed:
+            self.flush_pending_videos()
         # 3. Close own parquet writer
         self.close_writer()
         # 4. Finalize metadata (idempotent)

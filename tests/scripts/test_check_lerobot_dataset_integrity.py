@@ -145,3 +145,47 @@ def test_repair_refuses_in_place_output(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="in-place repair is forbidden"):
         DatasetRepairer(checker, source).run(checker.run(), timestamp_tolerance_s=1e-4)
+
+
+def test_repair_preserves_and_remaps_safety_without_certifying_training(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "repaired"
+    _make_gapped_dataset(source)
+    sidecar = source / "meta/safety/episode_000002.jsonl"
+    sidecar.parent.mkdir()
+    rows = [
+        {
+            "frame_index": 0,
+            "client_monotonic_s": 1.0,
+            "safety": {"joint_holds": {"joint": 2}},
+            "requested_action": {"joint": 8},
+        },
+        {"frame_index": None, "event": {"type": "feedback_wait"}},
+        {"frame_index": 1, "client_monotonic_s": 1.04, "safety": {}},
+        {"frame_index": None, "event": {"type": "recorder_closed", "frame_count": 2, "dropped_records": 0}},
+    ]
+    sidecar.write_text("\n".join(json.dumps({"episode_index": 2, **row}) for row in rows) + "\n")
+    checker = IntegrityChecker(source, decode_videos=True, timestamp_tolerance_s=1e-4)
+    report = checker.run()
+    _, repaired = DatasetRepairer(checker, output).run(report, timestamp_tolerance_s=1e-4)
+    assert repaired["valid"]
+    assert repaired["training_review"] == "required"
+    original = [
+        json.loads(line) for line in (source / "meta/safety/episode_000002.jsonl").read_text().splitlines()
+    ]
+    restored = [
+        json.loads(line) for line in (output / "meta/safety/episode_000001.jsonl").read_text().splitlines()
+    ]
+    assert restored == [{**row, "episode_index": 1} for row in original]
+
+
+def test_checker_marks_truncated_log_and_capture_gap(tmp_path):
+    source = tmp_path / "source"
+    _make_gapped_dataset(source)
+    path = source / "meta/safety/episode_000002.jsonl"
+    path.parent.mkdir()
+    rows = [{"episode_index": 2, "frame_index": i, "client_monotonic_s": 2 * i} for i in range(2)]
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    report = IntegrityChecker(source, decode_videos=True, timestamp_tolerance_s=1e-4).run()
+    codes = {issue["code"] for issue in report["issues"]}
+    assert {"SAFETY_LOG_INCOMPLETE", "SAFETY_TIME_GAP", "SAFETY_SIDECAR_MISSING"} <= codes
