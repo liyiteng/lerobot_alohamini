@@ -191,12 +191,40 @@ Legacy commands cannot provide session/epoch replay protection.
 > Replace `<Pi_IP>` with your Raspberry Pi's IP address.
 > `record_bi.py` prints the local dataset path and uploads to Hugging Face Hub by default. Add `--dataset.push_to_hub=false` to keep the dataset local only.
 > Add `--dataset.root /path/to/dataset` when you want to store or resume from a specific local directory.
-> `record_bi.py` retains the original single-rate behavior: control and dataset
-> sampling both run at `--dataset.fps`. To opt into 50 Hz control with complete,
+> `record_bi.py` runs control at `--dataset.fps` and records only fresh state and
+> complete, aligned camera frames. Both recorders may extend the episode to reach
+> the requested frame count. To use 50 Hz control with complete,
 > fresh-camera samples at the dataset rate, run the same command with
-> `record_bi_multirate.py`. The multirate recorder may run slightly past the
-> countdown to reach the exact frame count and rejects stalled or misaligned
-> camera data instead of silently writing repeated frames.
+> `record_bi_multirate.py`. The multirate recorder waits for complete, aligned
+> camera frames and may run past the countdown to reach the requested frame count.
+> Temporary camera stalls or alignment errors do not end teleoperation. Press
+> the normal episode-stop key to save the frames collected so far.
+
+Both recorders keep recording during joint protection. Ctrl+C or a recording
+exception triggers saving of buffered frames and dataset finalization; `R` still
+explicitly discards the episode. Recovery requires writable storage and does not
+cover power loss or forced process termination.
+
+When Host feedback stops advancing, both recorders stop issuing new actions and
+wait without writing cached observations. Camera gaps skip recording but leave
+teleoperation running while joint feedback is fresh. Press the episode-stop key
+to retain a partial episode. After a severe overcurrent shutdown, inspect the
+robot and restart the Host manually before continuing.
+
+Protection and timing metadata are written asynchronously to
+`meta/safety/episode_XXXXXX.jsonl`. The dataset `action` remains the requested
+action. Each sidecar frame records its index, requested action, command identity,
+Host protection state and accepted arm targets. The feedback can acknowledge an
+earlier command: match `issued_command` against `safety.command`, not row position.
+Accepted targets are not measured joint positions. Host monotonic timestamps and
+PC monotonic timestamps use separate clocks. Camera gaps remain identifiable;
+split discontinuous segments before training policies on contiguous action chunks.
+Safety logging uses a bounded queue and a closing completeness record. Missing
+records and capture gaps require review. Dataset integrity checks report structural
+validity separately from training review; both repair stages retain safety logs.
+Failed episode saves retain `meta/recovery/episode_XXXXXX.json` and source images.
+After a partial commit, do not append or blindly retry: retain the dataset for
+recovery. Disk exhaustion can prevent even a recovery snapshot from being written.
 
 ### AlohaMini 1 — SO-ARM leader (5-DoF)
 
@@ -325,6 +353,14 @@ Make sure the Pi host is already running (§5), then run inference from the PC.
 > `alohamini1` (SO-ARM 5-DoF, 16-dim state) · `alohamini2` / `alohamini2pro` (AM-ARM 6-DoF, 18-dim state)
 
 ### `evaluate_bi.py` (custom script, N episodes)
+
+Update both the PC client and Pi Host before evaluation. Joint protection,
+command-watchdog events or stale Host feedback pause autonomous execution.
+Remove the obstruction and, if needed, release the joint hold with reverse
+teleoperation, then confirm recovery at the prompt. Recovery requires fresh Host
+feedback and clears previous inference/interpolation actions before restarting.
+Normal gripper contact does not pause evaluation. Buffered evaluation frames are
+saved on interruption.
 
 ACT uses synchronous inference. The interpolation multiplier below runs the robot control loop at
 `fps × multiplier` (20 × 3 = 60 Hz after the first action) and linearly interpolates between policy actions.

@@ -84,12 +84,8 @@ def test_client_primes_request_window_with_one_payload_kind() -> None:
     client.latest_host_timing = {"old": True}
     drained = []
     refilled = []
-    client._receive_observation_response = (
-        lambda token, timeout_ms: drained.append((token, timeout_ms))
-    )
-    client._fill_observation_request_window = (
-        lambda *, include_cameras: refilled.append(include_cameras)
-    )
+    client._receive_observation_response = lambda token, timeout_ms: drained.append((token, timeout_ms))
+    client._fill_observation_request_window = lambda *, include_cameras: refilled.append(include_cameras)
 
     AlohaMiniClient.prime_observation_request_window(client, include_cameras=False)
 
@@ -110,8 +106,10 @@ class FakeClock:
 
 
 class FakeDataset:
-    def __init__(self, fps: int, *, with_camera: bool) -> None:
+    def __init__(self, fps: int, *, with_camera: bool, root: Path) -> None:
         self.fps = fps
+        self.root = root
+        self.meta = SimpleNamespace(total_episodes=0)
         self.frames = []
         self.features = {
             "observation.state": {
@@ -167,9 +165,7 @@ class FakeRobot:
         }
         observation = {"joint": timestamp}
         if self._cameras_ft:
-            observation["forward"] = np.full(
-                (2, 2, 3), self.last_camera_index, dtype=np.uint8
-            )
+            observation["forward"] = np.full((2, 2, 3), self.last_camera_index, dtype=np.uint8)
         return observation
 
     def _from_keyboard_to_base_action(self, _keys):
@@ -184,25 +180,43 @@ class FakeRobot:
 
 def run_fake_recording(
     monkeypatch,
+    tmp_path,
     *,
     with_camera: bool,
     duplicate_once: bool = False,
     dataset_with_camera: bool | None = None,
+    camera_gap: bool = False,
+    stop_during_gap: bool = False,
 ) -> tuple[FakeRobot, FakeDataset, FakeClock]:
     clock = FakeClock()
     robot = FakeRobot(clock, with_camera=with_camera, duplicate_once=duplicate_once)
     dataset = FakeDataset(
         10,
         with_camera=with_camera if dataset_with_camera is None else dataset_with_camera,
+        root=tmp_path,
     )
+    events = {"exit_early": False}
+    if camera_gap:
+        get_observation = robot.get_observation
+
+        def interrupted_camera(**kwargs):
+            obs = get_observation(**kwargs)
+            if 0.05 < clock.now < 0.8:
+                robot.latest_host_timing["camera_capture_monotonic_s"] = {"forward": 0.0}
+            if stop_during_gap and clock.now > 0.7:
+                events["exit_early"] = True
+            return obs
+
+        robot.get_observation = interrupted_camera
     monkeypatch.setattr(record_utils_multirate.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(record_utils_multirate, "precise_sleep", clock.sleep)
+
     def identity(value):
         return value
 
     record_utils_multirate.record_loop(
         robot=robot,
-        events={"exit_early": False},
+        events=events,
         fps=10,
         leader_arm=SimpleNamespace(get_action=lambda: {"joint.pos": clock.now}),
         keyboard=SimpleNamespace(get_action=lambda: set()),
@@ -228,8 +242,8 @@ def test_default_recorder_keeps_the_original_single_rate_loop(monkeypatch) -> No
     assert record_bi.record_loop is default_record_utils.record_loop
 
 
-def test_record_loop_records_state_only_dataset_at_dataset_rate(monkeypatch) -> None:
-    robot, dataset, _clock = run_fake_recording(monkeypatch, with_camera=False)
+def test_record_loop_records_state_only_dataset_at_dataset_rate(monkeypatch, tmp_path) -> None:
+    robot, dataset, _clock = run_fake_recording(monkeypatch, tmp_path, with_camera=False)
 
     assert len(dataset.frames) == 2
     assert all("observation.state" in frame for frame in dataset.frames)
@@ -237,9 +251,10 @@ def test_record_loop_records_state_only_dataset_at_dataset_rate(monkeypatch) -> 
     assert robot.primed == [False]
 
 
-def test_record_loop_uses_dataset_features_not_connected_cameras(monkeypatch) -> None:
+def test_record_loop_uses_dataset_features_not_connected_cameras(monkeypatch, tmp_path) -> None:
     robot, dataset, _clock = run_fake_recording(
         monkeypatch,
+        tmp_path,
         with_camera=True,
         dataset_with_camera=False,
     )
@@ -248,9 +263,10 @@ def test_record_loop_uses_dataset_features_not_connected_cameras(monkeypatch) ->
     assert robot.camera_requests == 0
 
 
-def test_record_loop_skips_duplicate_images_but_reaches_target_frame_count(monkeypatch) -> None:
+def test_record_loop_skips_duplicate_images_but_reaches_target_frame_count(monkeypatch, tmp_path) -> None:
     robot, dataset, clock = run_fake_recording(
         monkeypatch,
+        tmp_path,
         with_camera=True,
         duplicate_once=True,
     )
@@ -260,3 +276,133 @@ def test_record_loop_skips_duplicate_images_but_reaches_target_frame_count(monke
     assert image_values == [1, 2]
     assert robot.camera_requests >= 3
     assert clock.now > 0.2
+
+
+def test_camera_gap_keeps_control_running_then_completes_episode(monkeypatch, tmp_path):
+    robot, dataset, clock = run_fake_recording(monkeypatch, tmp_path, with_camera=True, camera_gap=True)
+
+    assert len(dataset.frames) == 2
+    assert clock.now >= 0.8
+    assert len(robot.sent_actions) >= 40
+    metadata = (tmp_path / "meta/safety/episode_000000.jsonl").read_text()
+    assert "capture_wait" in metadata
+    assert "capture_recovered" in metadata
+
+
+def test_operator_can_end_stalled_camera_episode_without_losing_frames(monkeypatch, tmp_path):
+    robot, dataset, clock = run_fake_recording(
+        monkeypatch,
+        tmp_path,
+        with_camera=True,
+        camera_gap=True,
+        stop_during_gap=True,
+    )
+
+    assert len(dataset.frames) == 1
+    assert clock.now < 0.8
+    assert len(robot.sent_actions) > 30
+
+
+def test_default_recorder_continues_through_joint_protection(monkeypatch, tmp_path):
+    from examples.alohamini import record_utils
+
+    clock = FakeClock()
+    robot = FakeRobot(clock, with_camera=False)
+    robot.latest_safety_status = {"version": 1, "joint_holds": {"elbow": 1.0}}
+    dataset = FakeDataset(10, with_camera=False, root=tmp_path)
+    monkeypatch.setattr(record_utils.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(record_utils, "precise_sleep", clock.sleep)
+    record_utils.record_loop(
+        robot=robot,
+        events={"exit_early": False},
+        fps=10,
+        leader_arm=SimpleNamespace(get_action=lambda: {"joint.pos": clock.now}),
+        keyboard=SimpleNamespace(get_action=lambda: set()),
+        teleop_action_processor=lambda value: value[0],
+        robot_action_processor=lambda value: value[0],
+        robot_observation_processor=lambda value: value,
+        dataset=dataset,
+        control_time_s=0.2,
+        single_task="test",
+    )
+    assert len(dataset.frames) == 2
+    assert len(robot.sent_actions) == 2
+    assert '"joint_holds": {"elbow": 1.0}' in (tmp_path / "meta/safety/episode_000000.jsonl").read_text()
+
+
+@pytest.mark.parametrize("multirate", [False, True])
+@pytest.mark.parametrize("stop_early", [False, True])
+def test_recorders_wait_through_lost_feedback_without_commands_or_cached_frames(
+    monkeypatch,
+    tmp_path,
+    multirate,
+    stop_early,
+):
+    from examples.alohamini import record_utils
+
+    module = record_utils_multirate if multirate else record_utils
+    clock = FakeClock()
+    robot = FakeRobot(clock, with_camera=True)
+    robot.observation_sequence = 0
+    get_observation = robot.get_observation
+    cached = None
+    events = {"exit_early": False}
+
+    def interrupted_observation(**kwargs):
+        nonlocal cached
+        if clock.now < 0.05 or clock.now >= 0.6:
+            cached = get_observation(**kwargs)
+            robot.observation_sequence += 1
+        elif stop_early and clock.now >= 0.3:
+            events["exit_early"] = True
+        return cached
+
+    robot.get_observation = interrupted_observation
+    dataset = FakeDataset(10, with_camera=True, root=tmp_path)
+    monkeypatch.setattr(module.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(module, "precise_sleep", clock.sleep)
+    module.record_loop(
+        robot=robot,
+        events=events,
+        fps=10,
+        dataset=dataset,
+        control_time_s=0.2,
+        single_task="test",
+        leader_arm=SimpleNamespace(get_action=lambda: {"joint.pos": clock.now}),
+        keyboard=SimpleNamespace(get_action=lambda: set()),
+        teleop_action_processor=lambda value: value[0],
+        robot_action_processor=lambda value: value[0],
+        robot_observation_processor=lambda value: value,
+    )
+    assert len(dataset.frames) == (1 if stop_early else 2)
+    assert all(not 0.05 <= action["arm_joint.pos"] < 0.6 for action in robot.sent_actions)
+    metadata = (tmp_path / "meta/safety/episode_000000.jsonl").read_text()
+    assert "feedback_wait" in metadata
+    if not stop_early:
+        assert "feedback_recovered" in metadata
+        assert dataset.frames[-1]["observation.state"][0] >= 0.6
+
+
+def test_default_recorder_waits_for_new_images(monkeypatch, tmp_path):
+    from examples.alohamini import record_utils
+
+    clock = FakeClock()
+    robot = FakeRobot(clock, with_camera=True, duplicate_once=True)
+    dataset = FakeDataset(10, with_camera=True, root=tmp_path)
+    monkeypatch.setattr(record_utils.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(record_utils, "precise_sleep", clock.sleep)
+    record_utils.record_loop(
+        robot=robot,
+        events={"exit_early": False},
+        fps=10,
+        dataset=dataset,
+        control_time_s=0.2,
+        single_task="test",
+        leader_arm=SimpleNamespace(get_action=lambda: {"joint.pos": clock.now}),
+        keyboard=SimpleNamespace(get_action=lambda: set()),
+        teleop_action_processor=lambda value: value[0],
+        robot_action_processor=lambda value: value[0],
+        robot_observation_processor=lambda value: value,
+    )
+    assert [int(frame["observation.images.forward"][0, 0, 0]) for frame in dataset.frames] == [1, 2]
+    assert len(robot.sent_actions) == 3

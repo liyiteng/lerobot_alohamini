@@ -2,31 +2,54 @@
 
 import argparse
 import inspect
+import logging
 import math
 import time
+from contextlib import ExitStack
 
 import lerobot.robots.alohamini  # noqa: F401 — registers alohamini_client robot type
-
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets import aggregate_pipeline_dataset_features, create_initial_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.rtc.configuration_rtc import RTCConfig
 from lerobot.processor import make_default_processors
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.rollout.inference.factory import (
     RTCInferenceConfig,
     SyncInferenceConfig,
     create_inference_engine,
 )
 from lerobot.rollout.robot_wrapper import ThreadSafeRobot
-from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.utils.action_interpolator import ActionInterpolator
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.device_utils import auto_select_torch_device
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
-from lerobot.utils.visualization_utils import init_rerun
+
+try:
+    from .safety_utils import (
+        EvaluationSafetyGuard,
+        RecordingCadence,
+        RecordingGate,
+        SafetyRecorder,
+        hold_action,
+        preserve_dataset,
+        safety_snapshot,
+        stop_inference,
+    )
+except ImportError:
+    from safety_utils import (
+        EvaluationSafetyGuard,
+        RecordingCadence,
+        RecordingGate,
+        SafetyRecorder,
+        hold_action,
+        preserve_dataset,
+        safety_snapshot,
+        stop_inference,
+    )
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -62,7 +85,9 @@ def main():
         default="robot task",
     )
     parser.add_argument("--policy.path", "--hf_model_id", dest="policy_path", type=str, required=True)
-    parser.add_argument("--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, required=True)
+    parser.add_argument(
+        "--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, required=True
+    )
     parser.add_argument(
         "--dataset.push_to_hub",
         dest="push_to_hub",
@@ -126,6 +151,8 @@ def main():
     args = parser.parse_args()
     if args.reset_time < 0:
         parser.error("--eval.reset_time_s must be non-negative")
+    if args.episode_time <= 0 or args.fps <= 0:
+        parser.error("episode time and fps must be positive")
 
     device = str(auto_select_torch_device())
 
@@ -139,9 +166,9 @@ def main():
     # lerobot.rollout.context.build_rollout_context) ===
     if args.inference_type == "rtc":
         predict_chunk_params = inspect.signature(policy_class.predict_action_chunk).parameters
-        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(predict_chunk_params) or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values()
-        )
+        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(
+            predict_chunk_params
+        ) or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values())
         if not accepts_rtc_kwargs:
             raise ValueError(
                 f"Policy type '{policy_cfg.type}' does not support RTC inference: "
@@ -164,149 +191,204 @@ def main():
     policy.eval()
 
     # === Robot ===
-    robot_config = AlohaMiniClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
-                                         robot_model=args.robot_model)
+    robot_config = AlohaMiniClientConfig(
+        remote_ip=args.remote_ip, id=args.robot_id, robot_model=args.robot_model
+    )
     robot = AlohaMiniClient(robot_config)
-    robot.connect()
-    robot_wrapper = ThreadSafeRobot(robot)
+    with ExitStack() as cleanup:
+        robot.connect()
+        cleanup.callback(robot.disconnect)
+        robot_wrapper = ThreadSafeRobot(robot)
 
-    # === Processors ===
-    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+        # === Processors ===
+        teleop_action_processor, robot_action_processor, robot_observation_processor = (
+            make_default_processors()
+        )
 
-    # === Dataset features ===
-    # Use all observation features (pos + base vel/height) to match what record_bi.py records.
-    observation_features_hw = robot.observation_features
-    action_features_hw = robot.action_features
+        # === Dataset features ===
+        # Use all observation features (pos + base vel/height) to match what record_bi.py records.
+        observation_features_hw = robot.observation_features
+        action_features_hw = robot.action_features
 
-    action_dataset_features = aggregate_pipeline_dataset_features(
-        pipeline=teleop_action_processor,
-        initial_features=create_initial_features(action=action_features_hw),
-        use_videos=True,
-    )
-    observation_dataset_features = aggregate_pipeline_dataset_features(
-        pipeline=robot_observation_processor,
-        initial_features=create_initial_features(observation=observation_features_hw),
-        use_videos=True,
-    )
-    dataset_features = combine_feature_dicts(action_dataset_features, observation_dataset_features)
-    hw_features = hw_to_dataset_features(observation_features_hw, "observation")
-    ordered_action_keys = list(action_features_hw.keys())
+        action_dataset_features = aggregate_pipeline_dataset_features(
+            pipeline=teleop_action_processor,
+            initial_features=create_initial_features(action=action_features_hw),
+            use_videos=True,
+        )
+        observation_dataset_features = aggregate_pipeline_dataset_features(
+            pipeline=robot_observation_processor,
+            initial_features=create_initial_features(observation=observation_features_hw),
+            use_videos=True,
+        )
+        dataset_features = combine_feature_dicts(action_dataset_features, observation_dataset_features)
+        hw_features = hw_to_dataset_features(observation_features_hw, "observation")
+        ordered_action_keys = list(action_features_hw.keys())
 
-    # === Dataset ===
-    dataset = LeRobotDataset.create(
-        repo_id=args.dataset_repo_id,
-        fps=args.fps,
-        features=dataset_features,
-        robot_type=robot.name,
-        use_videos=True,
-        image_writer_threads=4,
-    )
+        # === Dataset ===
+        dataset = LeRobotDataset.create(
+            repo_id=args.dataset_repo_id,
+            fps=args.fps,
+            features=dataset_features,
+            robot_type=robot.name,
+            use_videos=True,
+            image_writer_threads=4,
+        )
 
-    # === Policy processors (needs dataset stats) ===
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy_cfg=policy_cfg,
-        pretrained_path=args.policy_path,
-        dataset_stats=dataset.meta.stats,
-        preprocessor_overrides={"device_processor": {"device": device}},
-    )
+        cleanup.enter_context(preserve_dataset(dataset))
 
-    # === Inference engine ===
-    engine = create_inference_engine(
-        inference_cfg,
-        policy=policy,
-        preprocessor=preprocessor,
-        postprocessor=postprocessor,
-        robot_wrapper=robot_wrapper,
-        hw_features=hw_features,
-        dataset_features=dataset_features,
-        ordered_action_keys=ordered_action_keys,
-        task=args.task_description,
-        fps=float(args.fps),
-        device=device,
-    )
-    engine.start()
+        # === Policy processors (needs dataset stats) ===
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=policy_cfg,
+            pretrained_path=args.policy_path,
+            dataset_stats=dataset.meta.stats,
+            preprocessor_overrides={"device_processor": {"device": device}},
+        )
 
-    #init_rerun(session_name="alohamini_evaluate")
-    log_say("Starting evaluation")
+        # === Inference engine ===
+        engine = create_inference_engine(
+            inference_cfg,
+            policy=policy,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            robot_wrapper=robot_wrapper,
+            hw_features=hw_features,
+            dataset_features=dataset_features,
+            ordered_action_keys=ordered_action_keys,
+            task=args.task_description,
+            fps=float(args.fps),
+            device=device,
+        )
+        log_say("Starting evaluation")
 
-    interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
-    control_interval = interpolator.get_control_interval(args.fps)
-    recorded = 0
+        interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
+        control_interval = interpolator.get_control_interval(args.fps)
+        recorded = 0
+        safety_guard = EvaluationSafetyGuard()
 
-    def reset_environment(next_episode: int) -> None:
-        """Wait for manual scene reset while draining remote observations."""
-        if args.reset_time == 0:
-            return
+        def reset_environment(next_episode: int) -> None:
+            """Wait for manual scene reset while draining remote observations."""
+            if args.reset_time == 0:
+                return
 
-        deadline = time.monotonic() + args.reset_time
-        last_remaining = None
-        while True:
-            remaining = max(0, math.ceil(deadline - time.monotonic()))
-            if remaining != last_remaining:
-                print(
-                    f"\r[RESET] Prepare evaluation episode {next_episode}/{args.num_episodes}: "
-                    f"{remaining}s remaining",
-                    end="",
-                    flush=True,
-                )
-                last_remaining = remaining
-            if remaining == 0:
-                break
+            deadline = time.monotonic() + args.reset_time
+            last_remaining = None
+            while True:
+                remaining = max(0, math.ceil(deadline - time.monotonic()))
+                if remaining != last_remaining:
+                    print(
+                        f"\r[RESET] Prepare evaluation episode {next_episode}/{args.num_episodes}: "
+                        f"{remaining}s remaining",
+                        end="",
+                        flush=True,
+                    )
+                    last_remaining = remaining
+                if remaining == 0:
+                    break
 
-            # Keep consuming observations during reset so the next episode starts
-            # from a fresh remote frame rather than one cached before the reset.
-            robot.get_observation()
-            sleep_t = min(control_interval, max(0.0, deadline - time.monotonic()))
-            if sleep_t > 0:
-                precise_sleep(sleep_t)
-        print(flush=True)
+                # Keep consuming observations during reset so the next episode starts
+                # from a fresh remote frame rather than one cached before the reset.
+                robot.get_observation()
+                sleep_t = min(control_interval, max(0.0, deadline - time.monotonic()))
+                if sleep_t > 0:
+                    precise_sleep(sleep_t)
+            print(flush=True)
 
-    while recorded < args.num_episodes:
-        log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
-        engine.reset()
-        interpolator.reset()
-        engine.resume()
-        start = time.perf_counter()
-        cached_obs_processed = None
+        try:
+            while recorded < args.num_episodes:
+                log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
+                stop_inference(engine)
+                engine.reset()
+                engine.start()
+                interpolator.reset()
+                engine.resume()
+                start = time.perf_counter()
 
-        while (time.perf_counter() - start) < args.episode_time:
-            loop_start = time.perf_counter()
+                with SafetyRecorder(dataset) as safety_recorder:
+                    recording_cadence = RecordingCadence(args.fps)
+                    frame_gate = RecordingGate(robot, dataset, safety_recorder)
+                    while (time.perf_counter() - start) < args.episode_time:
+                        loop_start = time.perf_counter()
 
-            obs_raw = robot.get_observation()
-            if cached_obs_processed is None or interpolator.needs_new_action():
-                obs_processed = robot_observation_processor(obs_raw)
-                engine.notify_observation(obs_processed)
-                cached_obs_processed = obs_processed
-            else:
-                obs_processed = cached_obs_processed
-            obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+                        obs_raw = robot.get_observation()
+                        reason = safety_guard.reason(robot)
+                        if reason:
+                            paused_at = time.perf_counter()
+                            safety_guard.recover(
+                                robot, engine, interpolator, safety_recorder, obs_raw, reason
+                            )
+                            start += time.perf_counter() - paused_at
+                            continue
+                        sampled_safety = safety_snapshot(robot)
+                        obs_processed = robot_observation_processor(obs_raw)
+                        if interpolator.needs_new_action():
+                            engine.notify_observation(obs_processed)
+                        obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
 
-            if interpolator.needs_new_action():
-                action_tensor = engine.get_action(obs_frame)
-                if action_tensor is not None:
-                    interpolator.add(action_tensor.cpu())
+                        if interpolator.needs_new_action():
+                            action_tensor = engine.get_action(obs_frame)
+                            if action_tensor is not None:
+                                if action_tensor.ndim != 1 or action_tensor.numel() != len(
+                                    ordered_action_keys
+                                ):
+                                    raise ValueError(
+                                        "Policy action shape does not match the robot actuator schema"
+                                    )
+                                interpolator.add(action_tensor.cpu())
 
-            interp_action = interpolator.get()
-            if interp_action is not None:
-                action_dict = {k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)}
-                robot.send_action(robot_action_processor((action_dict, obs_raw)))
-                action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
-                dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
+                        # A slow synchronous inference may outlive the Host watchdog.
+                        if not robot.feedback_fresh:
+                            obs_raw = robot.get_observation()
+                            sampled_safety = safety_snapshot(robot)
+                            obs_processed = robot_observation_processor(obs_raw)
+                            obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+                        if safety_guard.reason(robot):
+                            continue
+                        interp_action = interpolator.get()
+                        if interp_action is not None:
+                            action_dict = {
+                                k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)
+                            }
+                            sent = robot.send_action(robot_action_processor((action_dict, obs_raw)))
+                            if (
+                                sent
+                                and recording_cadence.ready(time.perf_counter())
+                                and frame_gate.frame_ready(obs_processed)
+                            ):
+                                action_frame = build_dataset_frame(
+                                    dataset_features, action_dict, prefix=ACTION
+                                )
+                                dataset.add_frame(
+                                    {**obs_frame, **action_frame, "task": args.task_description}
+                                )
+                                safety_recorder.write(
+                                    safety=sampled_safety,
+                                    requested_action=action_dict,
+                                    issued_command=dict(robot.last_sent_command),
+                                    host_timing=dict(robot.latest_host_timing),
+                                )
 
-            dt = time.perf_counter() - loop_start
-            if (sleep_t := control_interval - dt) > 0:
-                precise_sleep(sleep_t)
+                        dt = time.perf_counter() - loop_start
+                        if (sleep_t := control_interval - dt) > 0:
+                            precise_sleep(sleep_t)
 
-        engine.pause()
-        dataset.save_episode()
-        recorded += 1
-        if recorded < args.num_episodes:
-            reset_environment(recorded + 1)
-
+                engine.pause()
+                robot.send_action(hold_action(obs_raw))
+                stop_inference(engine)
+                dataset.save_episode()
+                recorded += 1
+                if recorded < args.num_episodes:
+                    reset_environment(recorded + 1)
+        finally:
+            engine.pause()
+            try:
+                robot.send_action(hold_action(robot.last_remote_state))
+            except Exception:
+                logging.exception("Unable to send final hold command")
+            try:
+                engine.stop()
+            except Exception:
+                logging.exception("Inference worker did not stop cleanly")
     log_say("Evaluation complete")
-    engine.stop()
-    robot.disconnect()
-    dataset.finalize()
     if args.push_to_hub:
         dataset.push_to_hub()
 

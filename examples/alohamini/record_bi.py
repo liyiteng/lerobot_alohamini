@@ -8,8 +8,11 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+
+from record_utils import record_loop
+from safety_utils import preserve_dataset
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import make_default_processors
@@ -22,8 +25,6 @@ from lerobot.utils.feature_utils import hw_to_dataset_features
 from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.utils import init_logging, log_say
 from lerobot.utils.visualization_utils import init_visualization, shutdown_visualization
-
-from record_utils import record_loop
 
 
 @contextmanager
@@ -69,19 +70,55 @@ def main():
     # Keep the interactive output focused on recording state. Errors are still shown.
     init_logging(console_level="ERROR")
     parser = argparse.ArgumentParser(description="Record episodes with bi-arm teleoperation")
-    parser.add_argument("--dataset.repo_id", "--dataset", dest="dataset_repo_id", type=str, required=True,
-                    help="Dataset repo_id, e.g. liyitenga/record_20250914225057")
-    parser.add_argument("--dataset.root", "--root", dest="dataset_root", type=str, default=None,
-                    help="Local dataset root. Defaults to $HF_LEROBOT_HOME/<dataset.repo_id>.")
-    parser.add_argument("--dataset.num_episodes", "--num_episodes", dest="num_episodes",
-                        type=int, default=1, help="Number of episodes to record")
+    parser.add_argument(
+        "--dataset.repo_id",
+        "--dataset",
+        dest="dataset_repo_id",
+        type=str,
+        required=True,
+        help="Dataset repo_id, e.g. liyitenga/record_20250914225057",
+    )
+    parser.add_argument(
+        "--dataset.root",
+        "--root",
+        dest="dataset_root",
+        type=str,
+        default=None,
+        help="Local dataset root. Defaults to $HF_LEROBOT_HOME/<dataset.repo_id>.",
+    )
+    parser.add_argument(
+        "--dataset.num_episodes",
+        "--num_episodes",
+        dest="num_episodes",
+        type=int,
+        default=1,
+        help="Number of episodes to record",
+    )
     parser.add_argument("--dataset.fps", "--fps", dest="fps", type=int, default=30, help="Frames per second")
-    parser.add_argument("--dataset.episode_time_s", "--episode_time", dest="episode_time",
-                        type=int, default=60, help="Duration of each episode (seconds)")
-    parser.add_argument("--dataset.reset_time_s", "--reset_time", dest="reset_time",
-                        type=int, default=10, help="Reset duration between episodes (seconds)")
-    parser.add_argument("--dataset.single_task", "--task_description", dest="task_description",
-                        type=str, default="My task description4", help="Task description")
+    parser.add_argument(
+        "--dataset.episode_time_s",
+        "--episode_time",
+        dest="episode_time",
+        type=int,
+        default=60,
+        help="Duration of each episode (seconds)",
+    )
+    parser.add_argument(
+        "--dataset.reset_time_s",
+        "--reset_time",
+        dest="reset_time",
+        type=int,
+        default=10,
+        help="Reset duration between episodes (seconds)",
+    )
+    parser.add_argument(
+        "--dataset.single_task",
+        "--task_description",
+        dest="task_description",
+        type=str,
+        default="My task description4",
+        help="Task description",
+    )
     parser.add_argument(
         "--robot.remote_ip",
         "--remote_ip",
@@ -90,7 +127,9 @@ def main():
         default="127.0.0.1",
         help="Robot host IP",
     )
-    parser.add_argument("--robot.id", "--robot_id", dest="robot_id", type=str, default="my_alohamini", help="Robot ID")
+    parser.add_argument(
+        "--robot.id", "--robot_id", dest="robot_id", type=str, default="my_alohamini", help="Robot ID"
+    )
     parser.add_argument(
         "--robot.robot_model",
         "--robot_model",
@@ -247,9 +286,7 @@ def main():
             flush=True,
         )
         decode_text = " ".join(
-            f"{name}={value:.1f}"
-            for name, value in timing.items()
-            if name.startswith("decode_")
+            f"{name}={value:.1f}" for name, value in timing.items() if name.startswith("decode_")
         )
         if "obs_wait" in timing:
             print(
@@ -380,66 +417,64 @@ def main():
                 flush=True,
             )
 
-    while recorded_episodes < args.num_episodes and not events["stop_recording"]:
-        episode_number = dataset.num_episodes + 1
-        remaining_episodes = args.num_episodes - recorded_episodes
-        wait_for_fresh_observation(episode_number)
-        if events["stop_recording"]:
-            break
-        log_say(f"Recording episode {episode_number}")
-        print(
-            f"Episode {episode_number} recording started. "
-            f"{remaining_episodes} episode(s) remaining. Press -> to end recording; "
-            "press R to discard and re-record.",
-            flush=True,
-        )
+    with preserve_dataset(dataset), ExitStack() as cleanup:
+        if args.display_data:
+            cleanup.callback(shutdown_visualization, "rerun")
+        if listener is not None:
+            cleanup.callback(listener.stop)
+        cleanup.callback(keyboard.disconnect)
+        cleanup.callback(leader_arm.disconnect)
+        cleanup.callback(robot.disconnect)
+        while recorded_episodes < args.num_episodes and not events["stop_recording"]:
+            episode_number = dataset.num_episodes + 1
+            remaining_episodes = args.num_episodes - recorded_episodes
+            wait_for_fresh_observation(episode_number)
+            if events["stop_recording"]:
+                break
+            log_say(f"Recording episode {episode_number}")
+            print(
+                f"Episode {episode_number} recording started. "
+                f"{remaining_episodes} episode(s) remaining. Press -> to end recording; "
+                "press R to discard and re-record.",
+                flush=True,
+            )
 
-        # === Main record loop ===
-        record_episode(episode_number)
+            record_episode(episode_number)
+            log_say(f"Recording episode {episode_number} ended")
+            print(f"Episode {episode_number} recording ended. Resetting before save.", flush=True)
 
-        log_say(f"Recording episode {episode_number} ended")
-        print(f"Episode {episode_number} recording ended. Resetting before save.", flush=True)
+            # No dataset frames are written during scene reset.
+            if not events["stop_recording"]:
+                events["exit_early"] = False
+                reset_environment(episode_number)
 
-        # Finish resetting first. No dataset frames are written during this phase.
-        if not events["stop_recording"]:
-            events["exit_early"] = False
-            reset_environment(episode_number)
+            if events["rerecord_episode"]:
+                print(f"Discarding episode {episode_number}; it will not be saved.", flush=True)
+                events["rerecord_episode"] = False
+                events["exit_early"] = False
+                dataset.clear_episode_buffer()
+                safety_path = (
+                    dataset.root / "meta" / "safety" / f"episode_{dataset.meta.total_episodes:06d}.jsonl"
+                )
+                safety_path.unlink(missing_ok=True)
+                continue
 
-        if events["rerecord_episode"]:
-            print(f"Discarding episode {episode_number}; it will not be saved.", flush=True)
+            if not dataset.has_pending_frames():
+                print("No frames collected; ready to record again.", flush=True)
+                continue
+            print(f"Saving episode {episode_number}; please wait...", flush=True)
+            save_started_at = time.perf_counter()
+            with native_stderr_as_debug():
+                dataset.save_episode()
+            print(
+                f"Episode {episode_number} saved in {time.perf_counter() - save_started_at:.1f} second(s).",
+                flush=True,
+            )
+            recorded_episodes += 1
             events["rerecord_episode"] = False
             events["exit_early"] = False
-            dataset.clear_episode_buffer()
-            continue
-
-        print(
-            f"Reset finished. Saving episode {episode_number}; this may take a while. Please wait...",
-            flush=True,
-        )
-        save_started_at = time.perf_counter()
-        with native_stderr_as_debug():
-            dataset.save_episode()
-        print(
-            f"Episode {episode_number} saved in {time.perf_counter() - save_started_at:.1f} second(s).",
-            flush=True,
-        )
-        recorded_episodes += 1
-        events["rerecord_episode"] = False
-        events["exit_early"] = False
-
-    # === Clean up ===
-    robot.disconnect()
-    leader_arm.disconnect()
-    keyboard.disconnect()
-    if listener is not None:
-        listener.stop()
-    print("Saving dataset...", flush=True)
-    with native_stderr_as_debug():
-        dataset.finalize()
     if args.push_to_hub:
         dataset.push_to_hub()
-    if args.display_data:
-        shutdown_visualization("rerun")
     print(f"Dataset saved at {dataset.root.resolve()}", flush=True)
 
 
