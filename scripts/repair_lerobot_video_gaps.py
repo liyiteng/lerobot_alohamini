@@ -92,6 +92,10 @@ def repair_video_gaps(source: Path, output: Path) -> dict[str, int | str]:
         shutil.copy2(source / "meta/stats.json", staging / "meta/stats.json")
         shutil.copy2(source / "meta/tasks.parquet", staging / "meta/tasks.parquet")
         shutil.copytree(source / "data", staging / "data")
+        if (source / "meta/safety").exists():
+            shutil.copytree(source / "meta/safety", staging / "meta/safety")
+        if (source / "meta/recovery").exists():
+            shutil.copytree(source / "meta/recovery", staging / "meta/recovery")
 
         repaired_files = 0
         copied_files = 0

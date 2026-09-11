@@ -15,6 +15,7 @@
 # limitations under the License.
 """Contract tests for DatasetWriter."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,6 +36,79 @@ SIMPLE_FEATURES = {
     "state": {"dtype": "float32", "shape": (6,), "names": None},
     "action": {"dtype": "float32", "shape": (6,), "names": None},
 }
+
+
+def test_early_save_failure_preserves_buffer_and_allows_explicit_retry(tmp_path, monkeypatch):
+    dataset = LeRobotDataset.create(
+        repo_id=DUMMY_REPO_ID, fps=30, features=SIMPLE_FEATURES, root=tmp_path / "ds"
+    )
+    dataset.add_frame(_make_frame(SIMPLE_FEATURES))
+    original_save_tasks = dataset.meta.save_episode_tasks
+    monkeypatch.setattr(
+        dataset.meta, "save_episode_tasks", lambda _tasks: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    with pytest.raises(OSError, match="disk full"):
+        dataset.save_episode()
+    assert dataset.has_pending_frames()
+    assert dataset.writer.episode_buffer["size"] == 1
+    recovery = dataset.root / "meta/recovery/episode_000000.json"
+    assert json.loads(recovery.read_text())["size"] == 1
+    monkeypatch.setattr(dataset.meta, "save_episode_tasks", original_save_tasks)
+    dataset.save_episode()
+    dataset.finalize()
+    assert dataset.meta.total_frames == 1
+    assert not recovery.exists()
+
+
+def test_partial_commit_is_not_appended_twice(tmp_path, monkeypatch):
+    dataset = LeRobotDataset.create(
+        repo_id=DUMMY_REPO_ID, fps=30, features=SIMPLE_FEATURES, root=tmp_path / "ds"
+    )
+    dataset.add_frame(_make_frame(SIMPLE_FEATURES))
+    save_data = dataset.writer._save_episode_data
+
+    def fail_after_append(buffer):
+        save_data(buffer)
+        raise OSError("metadata write failed")
+
+    monkeypatch.setattr(dataset.writer, "_save_episode_data", fail_after_append)
+    with pytest.raises(OSError, match="metadata write failed"):
+        dataset.save_episode()
+    assert dataset.has_pending_frames()
+    with pytest.raises(RuntimeError, match="recover"):
+        dataset.save_episode()
+    with pytest.raises(RuntimeError, match="Recover"):
+        dataset.add_frame(_make_frame(SIMPLE_FEATURES))
+    assert dataset.writer._recorded_frames == 1
+    dataset.finalize()
+    assert (dataset.root / "meta/recovery/episode_000000.json").exists()
+
+
+def test_image_submission_failure_does_not_misalign_buffer_columns(tmp_path, monkeypatch):
+    features = {**SIMPLE_FEATURES, "image": {"dtype": "image", "shape": (8, 8, 3), "names": None}}
+    dataset = LeRobotDataset.create(repo_id=DUMMY_REPO_ID, fps=30, features=features, root=tmp_path / "ds")
+
+    def fail(*_args):
+        raise OSError("image queue unavailable")
+
+    monkeypatch.setattr(dataset.writer, "_save_image", fail)
+    with pytest.raises(OSError, match="image queue unavailable"):
+        dataset.add_frame(_make_frame(features))
+    assert not dataset.has_pending_frames()
+    assert all(not values for values in dataset.writer.episode_buffer.values() if isinstance(values, list))
+    dataset.finalize()
+
+
+def test_missing_image_is_detected_before_parquet_commit(tmp_path, monkeypatch):
+    features = {**SIMPLE_FEATURES, "image": {"dtype": "image", "shape": (8, 8, 3), "names": None}}
+    dataset = LeRobotDataset.create(repo_id=DUMMY_REPO_ID, fps=30, features=features, root=tmp_path / "ds")
+    monkeypatch.setattr(dataset.writer, "_save_image", lambda *_args: None)
+    dataset.add_frame(_make_frame(features))
+    with pytest.raises(OSError, match="Image write did not complete"):
+        dataset.save_episode()
+    assert dataset.has_pending_frames()
+    assert not dataset.writer._commit_started
+    dataset.finalize()
 
 
 def _make_frame(features: dict, task: str = "Dummy task") -> dict:
