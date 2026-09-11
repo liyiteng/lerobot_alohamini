@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from lerobot.robots.alohamini import alohamini_client as alohamini_client_module
+from lerobot.motors import MotorNormMode
+from lerobot.robots.alohamini import (
+    alohamini as alohamini_module,
+    alohamini_client as alohamini_client_module,
+)
 from lerobot.robots.alohamini.alohamini import AlohaMini
 from lerobot.robots.alohamini.alohamini_client import AlohaMiniClient
 from lerobot.robots.alohamini.alohamini_host import (
@@ -252,27 +256,39 @@ def test_lift_axis_returns_empty_mapping_without_lift_command() -> None:
 
 
 class FakeBus:
-    def __init__(self) -> None:
-        self.motors = {"arm_left_elbow_flex": object()}
+    def __init__(self, *, current_raw: float = 0.0, motor_model: str = "sts3095") -> None:
+        self.motors = {
+            "arm_left_elbow_flex": SimpleNamespace(model=motor_model, norm_mode=MotorNormMode.DEGREES)
+        }
+        self.current_raw = current_raw
         self.reads: list[str] = []
+        self.writes = []
+        self.model_resolution_table = {motor_model: 4096}
+        self.calibration = {"arm_left_elbow_flex": SimpleNamespace(range_min=0, range_max=4095)}
 
     def sync_read(self, register: str, motors: list[str]) -> dict[str, float]:
         self.reads.append(register)
         if register == "Present_Current":
-            return dict.fromkeys(motors, 0.0)
+            return dict.fromkeys(motors, self.current_raw)
         return dict.fromkeys(motors, 1.0)
+
+    def sync_write(self, register, values, **kwargs):
+        self.writes.append((register, dict(values)))
 
 
 def make_robot_feedback_stub(bus: FakeBus) -> AlohaMini:
     robot = object.__new__(AlohaMini)
+    robot.left_bus = bus
+    robot.right_bus = None
+    robot._initialize_current_protection()
     robot._feedback_currents_raw = {"arm_left_elbow_flex": 0.0}
     robot._feedback_positions = {"arm_left_elbow_flex": 1.0}
-    robot._joint_current_limit_ma = 1800.0
-    robot._joint_overcurrent_trip_n = 3
-    robot._joint_overcurrent_count = {}
     robot._joint_release_margin = 1.0
-    robot._joint_hold_goal = {}
-    robot._joint_hold_direction = {}
+    robot._feedback_lift_height_mm = None
+    robot.config = SimpleNamespace(max_relative_target=None)
+    robot.lift = SimpleNamespace(apply_action=lambda *_args, **_kwargs: {})
+    robot._body_to_wheel_raw = lambda *_args: {}
+    robot.logs = {}
     return robot
 
 
@@ -298,11 +314,13 @@ def test_current_limiter_keeps_read_through_fallback() -> None:
     assert bus.reads == ["Present_Current", "Present_Position"]
 
 
-def test_joint_current_limiter_ignores_short_current_spikes() -> None:
+def test_joint_current_limiter_uses_elapsed_time(monkeypatch) -> None:
     bus = FakeBus()
     robot = make_robot_feedback_stub(bus)
-    robot._feedback_currents_raw["arm_left_elbow_flex"] = 300.0
+    robot._feedback_currents_raw["arm_left_elbow_flex"] = 600.0
     goal = {"arm_left_elbow_flex.pos": 10.0}
+    times = iter((1.0, 1.149, 1.151))
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: next(times))
 
     first = robot._limit_joint_goal_by_current(bus, goal)
     second = robot._limit_joint_goal_by_current(bus, goal)
@@ -313,10 +331,282 @@ def test_joint_current_limiter_ignores_short_current_spikes() -> None:
     assert held == {"arm_left_elbow_flex.pos": 1.0}
 
 
+def test_joint_current_limiter_does_not_hold_a_moving_joint(monkeypatch) -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    robot._feedback_currents_raw["arm_left_elbow_flex"] = 600.0
+    goal = {"arm_left_elbow_flex.pos": 10.0}
+    times = iter((1.0, 1.160, 1.320))
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: next(times))
+
+    assert robot._limit_joint_goal_by_current(bus, goal) == goal
+    robot._feedback_positions["arm_left_elbow_flex"] = 2.0
+    assert robot._limit_joint_goal_by_current(bus, goal) == goal
+    robot._feedback_positions["arm_left_elbow_flex"] = 3.0
+    assert robot._limit_joint_goal_by_current(bus, goal) == goal
+    assert robot._joint_hold_goal == {}
+
+
+def test_joint_current_limiter_ignores_small_command_error(monkeypatch) -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    robot._feedback_currents_raw["arm_left_elbow_flex"] = 600.0
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: 1.0)
+
+    goal = {"arm_left_elbow_flex.pos": 2.0}
+    assert robot._limit_joint_goal_by_current(bus, goal) == goal
+    assert robot._joint_stall_candidates == {}
+
+
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("last_current", [0.0, 10.0])
+def test_current_units_do_not_depend_on_last_motor(raw, last_current) -> None:
+    bus = FakeBus()
+    bus.motors["lift_axis"] = SimpleNamespace(model="sts3095")
+    values = {"arm_left_elbow_flex": 100.0, "lift_axis": last_current}
+    bus.sync_read = lambda *_args: dict(values)
+    robot = make_robot_feedback_stub(bus)
+
+    result = robot.read_and_check_currents(raw=raw)
+
+    assert result == {name: value * (1.0 if raw else 6.5) for name, value in values.items()}
+
+
+def test_zero_current_on_other_bus_does_not_inflate_gripper_current() -> None:
+    robot, bus = make_gripper_feedback_stub(present=30.0, current_raw=20.0)
+    bus.motors["arm_left_gripper"] = SimpleNamespace(model="sts3250")
+    bus.current_raw = 20.0
+    robot.left_bus = bus
+    robot.right_bus = FakeBus(current_raw=0.0)
+    robot._initialize_current_protection()
+    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+
+    goal = {"arm_left_gripper.pos": 0.0}
+    assert robot._limit_gripper_goal_by_current(bus, goal) == goal
+    assert robot._gripper_hold_goal == {}
+
+
+@pytest.mark.parametrize("frequency_hz", [30, 50])
+@pytest.mark.parametrize(
+    "norm_mode,calibration_span",
+    [
+        (MotorNormMode.DEGREES, 4095),
+        (MotorNormMode.RANGE_M100_100, 1024),
+        (MotorNormMode.RANGE_M100_100, 4095),
+    ],
+)
+def test_slow_motion_uses_physical_degrees(monkeypatch, frequency_hz, norm_mode, calibration_span) -> None:
+    bus = FakeBus()
+    motor = "arm_left_elbow_flex"
+    bus.motors[motor].norm_mode = norm_mode
+    bus.calibration[motor].range_max = calibration_span
+    units_per_degree = 1.0 if norm_mode is MotorNormMode.DEGREES else 200 * 4095 / (calibration_span * 360)
+    robot = make_robot_feedback_stub(bus)
+    robot._feedback_currents_raw[motor] = 600.0
+    goal = {motor + ".pos": 10.0 * units_per_degree}
+    for sample in range(frequency_hz // 2 + 1):
+        now = sample / frequency_hz
+        monkeypatch.setattr(alohamini_module.time, "monotonic", lambda now=now: now)
+        robot._feedback_positions[motor] = (1.0 + 2.0 * now) * units_per_degree
+        assert robot._limit_joint_goal_by_current(bus, goal) == goal
+    assert robot._joint_hold_goal == {}
+
+
+@pytest.mark.parametrize("frequency_hz", [30, 50])
+def test_idle_host_cycles_hold_stalled_joint_once_and_allow_retreat(monkeypatch, frequency_hz) -> None:
+    bus = FakeBus(current_raw=600.0)
+    robot = make_robot_feedback_stub(bus)
+    motor = "arm_left_elbow_flex"
+    key = motor + ".pos"
+    now = 0.0
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: now)
+    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+    assert AlohaMini.send_action.__wrapped__(robot, {key: 10.0})[key] == 10.0
+    bus.writes.clear()
+
+    trip_time = None
+    for sample in range(1, frequency_hz // 2):
+        now = sample / frequency_hz
+        robot._feedback_positions = {motor: 1.0}
+        robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+        corrections = robot.supervise_arm_motion()
+        if corrections:
+            assert corrections == {key: 1.0}
+            assert trip_time is None
+            trip_time = now
+    assert 0.150 <= trip_time < 0.150 + 1 / frequency_hz
+    assert bus.writes == [("Goal_Position", {motor: 1.0})]
+
+    bus.current_raw = 0.0
+    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+    assert robot.supervise_arm_motion() == {}
+    assert robot._joint_hold_goal == {motor: 1.0}
+    assert AlohaMini.send_action.__wrapped__(robot, {key: 0.0})[key] == 0.0
+    assert robot._joint_hold_goal == {}
+
+
+def test_normal_observation_clears_pending_stall(monkeypatch) -> None:
+    bus = FakeBus(current_raw=600.0)
+    robot = make_robot_feedback_stub(bus)
+    motor = "arm_left_elbow_flex"
+    now = 0.0
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: now)
+    goal = {motor + ".pos": 10.0}
+    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+    robot._limit_joint_goal_by_current(bus, goal)
+    assert motor in robot._joint_stall_candidates
+
+    now = 0.1
+    bus.current_raw = 0.0
+    robot.read_and_check_currents(raw=True)
+    assert robot._joint_stall_candidates == {}
+    now = 0.2
+    bus.current_raw = 600.0
+    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
+    assert robot._limit_joint_goal_by_current(bus, goal) == goal
+
+
+def test_target_reversal_restarts_stall_window(monkeypatch) -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    motor = "arm_left_elbow_flex"
+    robot._feedback_currents_raw[motor] = 600.0
+    times = iter((0.0, 0.14, 0.16))
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: next(times))
+    robot._limit_joint_goal_by_current(bus, {motor + ".pos": 10.0})
+    retreat = {motor + ".pos": -10.0}
+    assert robot._limit_joint_goal_by_current(bus, retreat) == retreat
+    assert robot._limit_joint_goal_by_current(bus, retreat) == retreat
+
+
+def test_encoder_jitter_does_not_release_a_stalled_joint(monkeypatch) -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    motor = "arm_left_elbow_flex"
+    robot._feedback_currents_raw[motor] = 600.0
+    goal = {motor + ".pos": 10.0}
+    for sample in range(10):
+        now = sample / 50
+        monkeypatch.setattr(alohamini_module.time, "monotonic", lambda now=now: now)
+        robot._feedback_positions[motor] = 1.0 + (0.08 if sample % 2 else 0.0)
+        result = robot._limit_joint_goal_by_current(bus, goal)
+    assert motor in robot._joint_hold_goal
+    assert result[motor + ".pos"] == robot._joint_hold_goal[motor]
+
+
+def test_partial_command_keeps_other_active_arm_targets(monkeypatch) -> None:
+    bus = FakeBus()
+    robot = make_robot_feedback_stub(bus)
+    key = "arm_left_elbow_flex.pos"
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: 0.0)
+    AlohaMini.send_action.__wrapped__(robot, {key: 10.0})
+    result = AlohaMini.send_action.__wrapped__(robot, {"x.vel": 0.1})
+    assert result[key] == 10.0
+    assert robot._arm_goal_positions == {key: 10.0}
+
+
+@pytest.mark.parametrize("gripper", [False, True])
+def test_feedback_failure_preserves_existing_hold(gripper) -> None:
+    if gripper:
+        robot, bus = make_gripper_feedback_stub(present=1.0, current_raw=0.0)
+        motor = "arm_left_gripper"
+        robot._gripper_hold_goal[motor] = 1.0
+        robot._gripper_hold_direction[motor] = -1.0
+        limiter = robot._limit_gripper_goal_by_current
+    else:
+        bus = FakeBus()
+        robot = make_robot_feedback_stub(bus)
+        motor = "arm_left_elbow_flex"
+        robot._joint_hold_goal[motor] = 1.0
+        robot._joint_hold_direction[motor] = -1.0
+        limiter = robot._limit_joint_goal_by_current
+
+    def fail_read(*_args):
+        raise OSError("serial read failed")
+
+    robot._feedback_positions.clear()
+    robot._feedback_currents_raw.clear()
+    bus.sync_read = fail_read
+    assert limiter(bus, {motor + ".pos": 10.0}) == {motor + ".pos": 1.0}
+
+
+@pytest.mark.parametrize("frequency_hz", [30, 50])
+def test_overcurrent_duration_is_independent_of_sample_frequency(frequency_hz: int) -> None:
+    duration_s = 0.650
+    started_at = {}
+    trip_time = None
+
+    for sample in range(frequency_hz * 2):
+        now = sample / frequency_hz
+        if alohamini_module._has_sustained_overcurrent(
+            started_at,
+            "arm_left_elbow_flex",
+            current_ma=4500.0,
+            limit_ma=4400.0,
+            now=now,
+            duration_s=duration_s,
+        ):
+            trip_time = now
+            break
+
+    assert trip_time is not None
+    assert duration_s <= trip_time < duration_s + 1 / frequency_hz
+
+
+def test_normal_current_clears_pending_overcurrent_duration() -> None:
+    started_at = {}
+
+    assert not alohamini_module._has_sustained_overcurrent(started_at, "motor", 3000.0, 2000.0, 0.0, 0.150)
+    assert not alohamini_module._has_sustained_overcurrent(started_at, "motor", 1000.0, 2000.0, 0.100, 0.150)
+    assert started_at == {}
+    assert not alohamini_module._has_sustained_overcurrent(started_at, "motor", 3000.0, 2000.0, 0.200, 0.150)
+
+
+@pytest.mark.parametrize(
+    ("motor_model", "expected"),
+    [
+        ("sts3095", (3300.0, 4400.0, 7840.0)),
+        ("sts3250", (2100.0, 2800.0, 3360.0)),
+        ("sts3215", (1350.0, 1800.0, 2160.0)),
+    ],
+)
+def test_current_limits_follow_motor_ratings(motor_model: str, expected: tuple[float, float, float]) -> None:
+    motor = SimpleNamespace(model=motor_model)
+
+    limits = alohamini_module._current_limits_for_motor(motor)
+    assert (limits.collision_ma, limits.sustained_ma, limits.near_stall_ma) == expected
+
+
+def test_current_limits_reject_unknown_motor_model() -> None:
+    with pytest.raises(ValueError, match="Missing current ratings"):
+        alohamini_module._current_limits_for_motor(SimpleNamespace(model="unknown"))
+
+
+@pytest.mark.parametrize(("current_raw", "duration"), [(-700.0, 0.650), (-1300.0, 0.080)])
+def test_overcurrent_stops_and_disconnects_after_elapsed_time(monkeypatch, current_raw, duration) -> None:
+    bus = FakeBus(current_raw=current_raw)
+    robot = make_robot_feedback_stub(bus)
+    events = []
+    robot.stop_motion = lambda: events.append("stop")
+    robot.disconnect = lambda: events.append("disconnect")
+    times = iter((1.0, 1.0 + duration - 0.001, 1.0 + duration + 0.001))
+    monkeypatch.setattr(alohamini_module.time, "monotonic", lambda: next(times))
+
+    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
+    assert robot.read_and_check_currents(raw=True)["arm_left_elbow_flex"] == current_raw
+    assert events == []
+    with pytest.raises(SystemExit, match="1"):
+        robot.read_and_check_currents(raw=True)
+    assert events == ["stop", "disconnect"]
+
+
 def make_gripper_feedback_stub(*, present: float, current_raw: float) -> tuple[AlohaMini, FakeBus]:
     bus = FakeBus()
-    bus.motors = {"arm_left_gripper": object()}
+    bus.motors = {"arm_left_gripper": SimpleNamespace(model="sts3250", norm_mode=MotorNormMode.RANGE_0_100)}
     robot = object.__new__(AlohaMini)
+    robot.left_bus = bus
+    robot.right_bus = None
+    robot._initialize_current_protection()
     robot._feedback_currents_raw = {"arm_left_gripper": current_raw}
     robot._feedback_positions = {"arm_left_gripper": present}
     robot._gripper_current_limit_ma = 500.0

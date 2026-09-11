@@ -347,6 +347,9 @@ def main():
             if command_received:
                 last_sent_action = robot.send_action(latest_action)
                 action_sent = True
+            else:
+                safety_corrections = robot.supervise_arm_motion()
+                last_sent_action.update(safety_corrections)
             action_done_t = time.perf_counter()
 
             encoding_timings_ms: dict[str, float] = {}
