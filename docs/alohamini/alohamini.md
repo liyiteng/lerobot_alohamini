@@ -181,6 +181,13 @@ Legacy unidentified commands remain supported as one shared legacy controller;
 do not run multiple legacy command clients together.
 Legacy commands cannot provide session/epoch replay protection.
 
+Synchronous evaluation refreshes expired feedback after inference, discarding
+responses prefetched before the calculation. The 250 ms feedback limit is not
+an inference deadline. Fresh feedback must still confirm the same safe control
+session; a watchdog event, joint protection, Host restart or ownership change
+pauses evaluation and discards queued actions until explicit recovery. No
+heartbeat commands are sent during inference to bypass the Host watchdog.
+
 ---
 
 ## 6. Dataset Recording

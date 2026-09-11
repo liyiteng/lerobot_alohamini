@@ -310,7 +310,7 @@ def main():
                         loop_start = time.perf_counter()
 
                         obs_raw = robot.get_observation()
-                        reason = safety_guard.reason(robot)
+                        obs_raw, reason = safety_guard.check_observation(robot, obs_raw)
                         if reason:
                             paused_at = time.perf_counter()
                             safety_guard.recover(
@@ -335,14 +335,17 @@ def main():
                                     )
                                 interpolator.add(action_tensor.cpu())
 
-                        # A slow synchronous inference may outlive the Host watchdog.
-                        if not robot.feedback_fresh:
-                            obs_raw = robot.get_observation()
-                            sampled_safety = safety_snapshot(robot)
-                            obs_processed = robot_observation_processor(obs_raw)
-                            obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
-                        if safety_guard.reason(robot):
+                        obs_raw, reason = safety_guard.check_observation(robot, obs_raw)
+                        if reason:
+                            paused_at = time.perf_counter()
+                            safety_guard.recover(
+                                robot, engine, interpolator, safety_recorder, obs_raw, reason
+                            )
+                            start += time.perf_counter() - paused_at
                             continue
+                        sampled_safety = safety_snapshot(robot)
+                        obs_processed = robot_observation_processor(obs_raw)
+                        obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
                         interp_action = interpolator.get()
                         if interp_action is not None:
                             action_dict = {

@@ -283,6 +283,18 @@ class AlohaMiniClient(Robot):
         self.latest_host_timing = {}
         self._fill_observation_request_window(include_cameras=include_cameras)
 
+    @check_if_not_connected
+    def refresh_observation(self) -> RobotObservation:
+        """Request feedback again after a long calculation, ignoring all prefetched responses.
+
+        This uses the normal bounded receive timeout and never sends motor commands.
+        Old responses are discarded by request-token matching, without waiting for each one.
+        """
+        self._feedback_valid = False
+        self._observation_request_tokens.clear()
+        self._request_times.clear()
+        return self.get_observation()
+
     def _poll_and_get_latest_message(self, *, include_cameras: bool = True) -> list[bytes] | None:
         """Consume the oldest response and replenish the bounded request window."""
 

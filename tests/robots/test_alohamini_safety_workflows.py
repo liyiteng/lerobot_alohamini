@@ -99,7 +99,8 @@ def test_eval_manual_recovery_discards_old_inference_before_resume(monkeypatch):
         observation_sequence=0,
         last_sent_command={},
     )
-    robot.prime_observation_request_window = Mock()
+    robot.feedback_fresh = True
+    robot.command_permitted = True
 
     def send_action(_action):
         robot.last_sent_command = {"client_id": "pc", "sequence": 1}
@@ -112,6 +113,7 @@ def test_eval_manual_recovery_discards_old_inference_before_resume(monkeypatch):
 
     robot.send_action = send_action
     robot.get_observation = get_observation
+    robot.refresh_observation = get_observation
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
     engine = Mock()
     engine._rtc_thread = None
