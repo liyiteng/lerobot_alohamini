@@ -5,7 +5,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from examples.alohamini.safety_utils import RecordingCadence, SafetyRecorder, preserve_dataset
+from examples.alohamini.safety_utils import RecordingCadence, RecordingGate, SafetyRecorder, preserve_dataset
+from lerobot.robots.alohamini.alohamini_client import AlohaMiniClient
+from lerobot.robots.alohamini.config_alohamini import AlohaMiniClientConfig
 
 
 @pytest.mark.parametrize("multiplier", [1, 2, 3, 4])
@@ -52,3 +54,15 @@ def test_cleanup_does_not_mask_original_error_or_retry_partial_commit():
     with pytest.raises(RuntimeError, match="original"), preserve_dataset(dataset):
         raise RuntimeError("original")
     dataset.save_episode.assert_not_called()
+
+
+def test_placeholder_camera_cannot_pass_recording_gate():
+    client = AlohaMiniClient(AlohaMiniClientConfig(remote_ip="127.0.0.1", cameras={}))
+    client._is_connected = True
+    client._cameras_ft = {"chest": (2, 2, 3)}
+    client._get_data = lambda **_kwargs: ({}, {})
+    dataset = SimpleNamespace(features={"observation.images.chest": {"dtype": "video"}})
+    gate = RecordingGate(client, dataset, SafetyRecorder(None))
+    observation = client.get_observation()
+    assert "chest" in observation
+    assert not gate.frame_ready(observation)

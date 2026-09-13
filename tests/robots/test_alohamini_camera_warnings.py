@@ -1,13 +1,11 @@
 import json
 import logging
 import time
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
-from examples.alohamini.safety_utils import RecordingGate, SafetyRecorder
 from lerobot.robots.alohamini.alohamini_client import AlohaMiniClient
 from lerobot.robots.alohamini.config_alohamini import AlohaMiniClientConfig
 
@@ -116,14 +114,6 @@ def test_no_response_does_not_repeat_warnings(client, caplog):
     for _ in range(5):
         client.get_observation()
     assert len(caplog.records) == 1
-
-
-def test_placeholder_camera_cannot_pass_recording_gate(client):
-    dataset = SimpleNamespace(features={"observation.images.chest": {"dtype": "video"}})
-    gate = RecordingGate(client, dataset, SafetyRecorder(None))
-    observation = receive(client, enabled=["forward"])
-    assert "chest" in observation
-    assert not gate.frame_ready(observation)
 
 
 def test_response_kind_follows_matched_token_not_next_request(client, monkeypatch):

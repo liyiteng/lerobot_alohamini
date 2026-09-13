@@ -188,6 +188,17 @@ session; a watchdog event, joint protection, Host restart or ownership change
 pauses evaluation and discards queued actions until explicit recovery. No
 heartbeat commands are sent during inference to bypass the Host watchdog.
 
+### Camera and transport diagnostics
+
+Camera warnings follow the Host's enabled-camera list and appear once per missing-image
+episode. State-only responses do not trigger missing-image warnings. Older Hosts without
+camera metadata use the client configuration. Cached and placeholder images do not gain
+fresh capture timestamps. Observation metadata includes sampled motor currents in mA.
+
+Temporary ZMQ send-queue backpressure defers observation requests to a later cycle;
+it does not block control or register unsent requests. Other transport errors remain
+visible, and unavailable feedback still prevents new commands.
+
 ### Terminal status
 
 The Host's `--profile_timing` output reports actual Host loop Hz and hardware,
