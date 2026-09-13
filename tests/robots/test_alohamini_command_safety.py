@@ -61,6 +61,7 @@ def test_client_adds_command_identity_only_for_updated_host(supported):
 
 def test_failed_image_decode_does_not_mark_cached_frame_fresh():
     client = object.__new__(AlohaMiniClient)
+    client._response_includes_cameras = False
     client.logs = {}
     client._response_requested_at = time.monotonic()
     client.last_frames = {"forward": "cached"}

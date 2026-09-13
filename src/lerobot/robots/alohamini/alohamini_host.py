@@ -129,6 +129,7 @@ def build_robot_metadata(robot: AlohaMini) -> dict:
         "schema_version": 1,
         "robot_model": robot.config.robot_model,
         "motors": motors,
+        "cameras": list(robot.cameras),
     }
     if getattr(robot, "lift", None) is not None:
         metadata["lift_axis"] = {
@@ -381,6 +382,7 @@ def main():
                     "_robot_metadata": robot_metadata,
                     "_safety": {
                         **robot.get_safety_status(),
+                        "currents_ma": tracking_currents_ma,
                         "watchdog_active": watchdog_active,
                         "watchdog_events": watchdog_events,
                         "command_watchdog_timeout_s": host.watchdog_timeout_ms / 1000,
