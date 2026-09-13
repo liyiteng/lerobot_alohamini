@@ -14,34 +14,112 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import logging
-import os
+import sys
 import time
+from contextlib import suppress
+from dataclasses import dataclass
 from functools import cached_property
 from itertools import chain
 from typing import Any
-import sys
+from uuid import uuid4
 
 import numpy as np
 
 from lerobot.cameras.utils import make_cameras_from_configs
-from lerobot.processor import RobotAction, RobotObservation
-from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import (
     FeetechMotorsBus,
     OperatingMode,
 )
+from lerobot.processor import RobotAction, RobotObservation
+from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
 from .config_alohamini import AlohaMiniConfig
+from .lift_axis import LiftAxis, LiftAxisConfig
 from .model_specs import arm_state_keys_for_robot_model, validate_robot_model
 
 logger = logging.getLogger(__name__)
 
-from .lift_axis import LiftAxis, LiftAxisConfig
+_CURRENT_MA_PER_RAW_UNIT = 6.5
+_JOINT_COLLISION_DURATION_S = 0.150
+_JOINT_STALL_MIN_COMMAND_ERROR_DEG = 2.0
+_JOINT_STALL_MIN_PROGRESS_DEG = 0.2
+_SUSTAINED_OVERCURRENT_DURATION_S = 0.650
+_NEAR_STALL_OVERCURRENT_DURATION_S = 0.080
+_COLLISION_RATED_CURRENT_MULTIPLIER = 1.5
+_SUSTAINED_RATED_CURRENT_MULTIPLIER = 2.0
+_NEAR_STALL_CURRENT_FRACTION = 0.8
+
+# Motor datasheet values: (rated current, stall current), in mA.
+_MOTOR_CURRENT_RATINGS_MA: dict[str, tuple[float, float]] = {
+    "sts3215": (900.0, 2700.0),
+    "sts3095": (2200.0, 9800.0),
+    "sts3250": (1400.0, 4200.0),
+}
+
+
+@dataclass(frozen=True)
+class _MotorCurrentLimits:
+    collision_ma: float
+    sustained_ma: float
+    near_stall_ma: float
+
+
+@dataclass(frozen=True)
+class _JointStallCandidate:
+    started_at: float
+    start_position: float
+    command_direction: float
+
+
+def _current_limits_for_motor(motor: Motor) -> _MotorCurrentLimits:
+    try:
+        rated_ma, stall_ma = _MOTOR_CURRENT_RATINGS_MA[motor.model]
+    except KeyError as exc:
+        raise ValueError(f"Missing current ratings for motor model '{motor.model}'.") from exc
+
+    return _MotorCurrentLimits(
+        collision_ma=_COLLISION_RATED_CURRENT_MULTIPLIER * rated_ma,
+        sustained_ma=_SUSTAINED_RATED_CURRENT_MULTIPLIER * rated_ma,
+        near_stall_ma=_NEAR_STALL_CURRENT_FRACTION * stall_ma,
+    )
+
+
+def _position_delta_degrees(bus: FeetechMotorsBus, motor: str, delta: float) -> float:
+    """Convert a position difference to degrees without changing the command space."""
+    actuator = bus.motors[motor]
+    if actuator.norm_mode is MotorNormMode.DEGREES:
+        return delta
+    calibration = bus.calibration[motor]
+    if actuator.norm_mode is MotorNormMode.RANGE_M100_100:
+        norm_range = 200.0
+    elif actuator.norm_mode is MotorNormMode.RANGE_0_100:
+        norm_range = 100.0
+    else:
+        raise ValueError(f"Unsupported normalization for {motor}: {actuator.norm_mode}")
+    resolution = bus.model_resolution_table[actuator.model] - 1
+    return delta * (calibration.range_max - calibration.range_min) / norm_range * 360 / resolution
+
+
+def _has_sustained_overcurrent(
+    started_at: dict[str, float],
+    motor: str,
+    current_ma: float,
+    limit_ma: float,
+    now: float,
+    duration_s: float,
+) -> bool:
+    if current_ma < limit_ma:
+        started_at.pop(motor, None)
+        return False
+
+    if motor not in started_at:
+        started_at[motor] = now
+        return duration_s <= 0.0
+    return now - started_at[motor] >= duration_s
 
 
 # Per-arm hardware profiles. Keep the profile name about the arm itself:
@@ -85,9 +163,7 @@ _ARM_PROFILES: dict[str, tuple[tuple[str, int, str, MotorNormMode | None], ...]]
 }
 
 
-def _make_arm_motors(
-    prefix: str, arm_profile: str, norm_mode_body: MotorNormMode
-) -> dict[str, Motor]:
+def _make_arm_motors(prefix: str, arm_profile: str, norm_mode_body: MotorNormMode) -> dict[str, Motor]:
     if arm_profile not in _ARM_PROFILES:
         raise ValueError(
             f"Unknown arm_profile '{arm_profile}'. Expected one of: {list(_ARM_PROFILES.keys())}."
@@ -138,9 +214,7 @@ class AlohaMini(Robot):
             "lift_axis": Motor(11, lm, MotorNormMode.DEGREES),
         }
         left_bus_calibration = {
-            name: calibration
-            for name, calibration in self.calibration.items()
-            if name in left_bus_motors
+            name: calibration for name, calibration in self.calibration.items() if name in left_bus_motors
         }
         self.left_bus = FeetechMotorsBus(
             port=self.config.left_port,
@@ -168,7 +242,7 @@ class AlohaMini(Robot):
             self._left_arm_state_keys = ()
             self._right_arm_state_keys = ()
         else:
-            self.left_arm_motors  = [m for m in self.left_bus.motors        if m.startswith("arm_left_")]
+            self.left_arm_motors = [m for m in self.left_bus.motors if m.startswith("arm_left_")]
             self.right_arm_motors = [m for m in self.right_bus.motors if m.startswith("arm_right_")]
 
         self.base_motors = [m for m in self.left_bus.motors if m.startswith("base_")]
@@ -178,16 +252,12 @@ class AlohaMini(Robot):
 
         self.cameras = make_cameras_from_configs(config.cameras)
 
-
         self.lift = LiftAxis(
             LiftAxisConfig(lead_mm_per_rev=specs["lead_mm_per_rev"], motor_model=lm),
             bus_left=self.left_bus,
             bus_right=self.right_bus,
         )
-        # Overcurrent debounce: require N consecutive over-limit reads
-        self._overcurrent_count: dict[str, int] = {}
-        self._overcurrent_trip_n = 20
-        self._last_currents_log_t = 0.0
+        self._initialize_current_protection()
         self._gripper_current_limit_ma = 500.0
         # Nudge the held position slightly further closed than present, so the gripper
         # keeps a bit of squeeze (a small resting current) instead of fully relaxing to 0mA.
@@ -206,20 +276,7 @@ class AlohaMini(Robot):
         self._gripper_hold_goal: dict[str, float] = {}
         self._gripper_hold_direction: dict[str, float] = {}
 
-        # Same idea as the gripper protection above, applied to the rest of the arm
-        # joints (shoulder/elbow/wrist, in degrees). Unlike the gripper there's no fixed
-        # "open direction" -- a joint can be pushed into an obstacle from either side
-        # depending on the motion, so the retreat direction is inferred per contact
-        # episode instead of configured. And unlike the gripper, we don't want to keep
-        # nudging force into whatever it hit -- this is collision protection, not grip
-        # force, so it just freezes at the held position. Require a short sustained
-        # overcurrent to reject normal acceleration spikes at 50 Hz.
-        self._joint_current_limit_ma = 1800.0
-        self._joint_overcurrent_trip_n = 3
-        self._joint_overcurrent_count: dict[str, int] = {}
         self._joint_release_margin = 1.0
-        self._joint_hold_goal: dict[str, float] = {}
-        self._joint_hold_direction: dict[str, float] = {}
 
         # Feedback sampled by get_observation() is reused by the following send_action().
         # This avoids reading the same position/current registers repeatedly in one Host
@@ -229,6 +286,22 @@ class AlohaMini(Robot):
         self._feedback_currents_raw: dict[str, float] = {}
         self._feedback_lift_height_mm: float | None = None
 
+    def _initialize_current_protection(self) -> None:
+        all_motors = dict(self.left_bus.motors)
+        if self.right_bus is not None:
+            all_motors.update(self.right_bus.motors)
+        self._current_limits = {name: _current_limits_for_motor(motor) for name, motor in all_motors.items()}
+        self._sustained_overcurrent_started_at: dict[str, float] = {}
+        self._near_stall_overcurrent_started_at: dict[str, float] = {}
+        self._joint_stall_candidates: dict[str, _JointStallCandidate] = {}
+        self._joint_hold_goal: dict[str, float] = {}
+        self._joint_hold_direction: dict[str, float] = {}
+        self._arm_goal_positions: dict[str, float] = {}
+        self._arm_sent_positions: dict[str, float] = {}
+        self._arm_sent_at: float | None = None
+        self._joint_hold_events = 0
+        self._safety_session_id = uuid4().hex
+        self._last_currents_log_t = 0.0
 
     @property
     def _state_ft(self) -> dict[str, type]:
@@ -239,8 +312,8 @@ class AlohaMini(Robot):
                 "x.vel",
                 "y.vel",
                 "theta.vel",
-                "lift_axis.height_mm",   # new
-                #"lift_axis.vel",         # new (optional, for debugging)
+                "lift_axis.height_mm",  # new
+                # "lift_axis.vel",         # new (optional, for debugging)
             ),
             float,
         )
@@ -262,12 +335,15 @@ class AlohaMini(Robot):
     # @property
     # def is_connected(self) -> bool:
     #     return self.left_bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
-    
+
     @property
     def is_connected(self) -> bool:
         cams_ok = all(cam.is_connected for cam in self.cameras.values())
-        return self.left_bus.is_connected and (self.right_bus.is_connected if self.right_bus else True) and cams_ok
-
+        return (
+            self.left_bus.is_connected
+            and (self.right_bus.is_connected if self.right_bus else True)
+            and cams_ok
+        )
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
@@ -292,13 +368,9 @@ class AlohaMini(Robot):
         else:
             logger.info("Skipping lift homing because AlohaMini is not calibrated.")
 
-        
-
     @property
     def is_calibrated(self) -> bool:
-        return self.left_bus.is_calibrated and (
-            self.right_bus.is_calibrated if self.right_bus else True
-        )
+        return self.left_bus.is_calibrated and (self.right_bus.is_calibrated if self.right_bus else True)
 
     def calibrate(self) -> None:
         """
@@ -390,7 +462,9 @@ class AlohaMini(Robot):
             right_homing = self.right_bus.set_half_turn_homings(self.right_arm_motors)
 
             right_full_turn_motor = "arm_right_wrist_roll"
-            full_turn_right = [right_full_turn_motor] if right_full_turn_motor in self.right_arm_motors else []
+            full_turn_right = (
+                [right_full_turn_motor] if right_full_turn_motor in self.right_arm_motors else []
+            )
             unknown_right = [m for m in self.right_arm_motors if m not in full_turn_right]
 
             print(
@@ -437,10 +511,6 @@ class AlohaMini(Robot):
         self._save_calibration()
         print("Calibration saved to", self.calibration_fpath)
 
-
-
-
-
     def configure(self):
         # Set-up arm actuators (position mode)
         # We assume that at connection time, arm is in a rest position,
@@ -470,7 +540,7 @@ class AlohaMini(Robot):
         for name in self.base_motors:
             self.left_bus.write("Operating_Mode", name, OperatingMode.VELOCITY.value)
 
-        #self.left_bus.enable_torque()
+        # self.left_bus.enable_torque()
 
         if self.right_bus:
             self.right_bus.disable_torque()
@@ -492,12 +562,9 @@ class AlohaMini(Robot):
                 self.right_bus.write("P_Coefficient", name, 16)
                 self.right_bus.write("I_Coefficient", name, 0)
                 self.right_bus.write("D_Coefficient", name, 32)
-            #self.right_bus.enable_torque()
+            # self.right_bus.enable_torque()
 
-        #self.lift.configure()
-
-
-
+        # self.lift.configure()
 
     def setup_motors(self) -> None:
         for motor in chain(reversed(self.arm_motors), reversed(self.base_motors)):
@@ -636,34 +703,25 @@ class AlohaMini(Robot):
         m_inv = np.linalg.inv(m)
         velocity_vector = m_inv.dot(wheel_linear_speeds)
         x, y, theta_rad = velocity_vector
-        
+
         theta = theta_rad * (180.0 / np.pi)
         return {
             "x.vel": -x,
             "y.vel": -y,
             "theta.vel": theta,
         }  # m/s and deg/s
-    
-    def _raw_to_ma(raw):
-        try:
-            return float(raw) * 6.5
-        except Exception:
-            return 0.0
-        
+
     @check_if_not_connected
     def get_observation(self, *, include_cameras: bool = True) -> RobotObservation:
         # Read actuators position for arm and vel for base
         observation_start_t = time.perf_counter()
         # arm_pos = self.left_bus.sync_read("Present_Position", self.arm_motors)
 
-        #print(f"Left arm motors: {self.left_arm_motors}, Right arm motors: {self.right_arm_motors}")  # debug
+        # print(f"Left arm motors: {self.left_arm_motors}, Right arm motors: {self.right_arm_motors}")  # debug
         left_pos = (
-            self.left_bus.sync_read("Present_Position", self.left_arm_motors)
-            if self.left_arm_motors
-            else {}
+            self.left_bus.sync_read("Present_Position", self.left_arm_motors) if self.left_arm_motors else {}
         )
         left_arm_done_t = time.perf_counter()
-
 
         base_wheel_vel = self.left_bus.sync_read("Present_Velocity", self.base_motors)
 
@@ -684,20 +742,18 @@ class AlohaMini(Robot):
         left_arm_state = {f"{k}.pos": v for k, v in left_pos.items()}
         right_arm_state = {f"{k}.pos": v for k, v in right_pos.items()}
 
-        obs_dict = {**left_arm_state, **right_arm_state,**base_vel}
+        obs_dict = {**left_arm_state, **right_arm_state, **base_vel}
         self.lift.contribute_observation(obs_dict)
         self._feedback_positions = {**left_pos, **right_pos}
         self._feedback_lift_height_mm = obs_dict.get("lift_axis.height_mm")
         lift_done_t = time.perf_counter()
-        #print(f"Observation dict so far: {obs_dict}")  # debug
+        # print(f"Observation dict so far: {obs_dict}")  # debug
 
         dt_ms = (lift_done_t - observation_start_t) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
         # currents protection
-        self._feedback_currents_raw = self.read_and_check_currents(
-            limit_ma=2000, print_currents=True, raw=True
-        )
+        self._feedback_currents_raw = self.read_and_check_currents(print_currents=True, raw=True)
         currents_done_t = time.perf_counter()
 
         # Camera retrieval is outside the state-only control path. Camera drivers keep
@@ -739,10 +795,7 @@ class AlohaMini(Robot):
             "state_sample_started_monotonic_s": observation_start_t,
             "state_sample_finished_monotonic_s": lift_done_t,
             "state_sample_unix_ns": clock_reference_unix_ns
-            - round(
-                (clock_reference_monotonic_s - state_sample_midpoint_monotonic_s)
-                * 1e9
-            ),
+            - round((clock_reference_monotonic_s - state_sample_midpoint_monotonic_s) * 1e9),
             "host_clock_reference": {
                 "monotonic_s": clock_reference_monotonic_s,
                 "unix_ns": clock_reference_unix_ns,
@@ -778,14 +831,25 @@ class AlohaMini(Robot):
             np.ndarray: the action sent to the motors, potentially clipped.
         """
         action_start_t = time.perf_counter()
+        arm_action = {**self._arm_goal_positions, **action}
         # arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
-        left_pos  = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_left_") and k.replace(".pos", "") in self.left_bus.motors}
-        right_pos = {k: v for k, v in action.items() if k.endswith(".pos") and k.startswith("arm_right_") and self.right_bus is not None and k.replace(".pos", "") in self.right_bus.motors}
-
-
-        base_goal_vel = {
-            key: float(action.get(key, 0.0)) for key in ("x.vel", "y.vel", "theta.vel")
+        left_pos = {
+            k: v
+            for k, v in arm_action.items()
+            if k.endswith(".pos")
+            and k.startswith("arm_left_")
+            and k.replace(".pos", "") in self.left_bus.motors
         }
+        right_pos = {
+            k: v
+            for k, v in arm_action.items()
+            if k.endswith(".pos")
+            and k.startswith("arm_right_")
+            and self.right_bus is not None
+            and k.replace(".pos", "") in self.right_bus.motors
+        }
+
+        base_goal_vel = {key: float(action.get(key, 0.0)) for key in ("x.vel", "y.vel", "theta.vel")}
 
         base_wheel_goal_vel = self._body_to_wheel_raw(
             base_goal_vel["x.vel"], base_goal_vel["y.vel"], base_goal_vel["theta.vel"]
@@ -800,9 +864,7 @@ class AlohaMini(Robot):
         #     arm_safe_goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
         #     arm_goal_pos = arm_safe_goal_pos
 
-        lift_sent = self.lift.apply_action(
-            action, current_height_mm=self._feedback_lift_height_mm
-        )
+        lift_sent = self.lift.apply_action(action, current_height_mm=self._feedback_lift_height_mm)
         lift_action_done_t = time.perf_counter()
 
         if left_pos and self.config.max_relative_target is not None:
@@ -828,6 +890,8 @@ class AlohaMini(Robot):
             right_pos = ensure_safe_goal_position(gp_right, self.config.max_relative_target)
         relative_limit_done_t = time.perf_counter()
 
+        self._arm_goal_positions.update(left_pos)
+        self._arm_goal_positions.update(right_pos)
         left_pos = self._limit_gripper_goal_by_current(self.left_bus, left_pos)
         left_gripper_limit_done_t = time.perf_counter()
         left_pos = self._limit_joint_goal_by_current(self.left_bus, left_pos)
@@ -846,13 +910,19 @@ class AlohaMini(Robot):
 
         # return {**arm_goal_pos, **base_goal_vel}
 
-        #print(f"[{filename}:{lineno}]Sending left_pos:{left_pos}, right_pos:{right_pos}, base_wheel_goal_vel:{base_wheel_goal_vel}")  # debug
-    
+        # print(f"[{filename}:{lineno}]Sending left_pos:{left_pos}, right_pos:{right_pos}, base_wheel_goal_vel:{base_wheel_goal_vel}")  # debug
+
         if left_pos:
             self.left_bus.sync_write("Goal_Position", {k.replace(".pos", ""): v for k, v in left_pos.items()})
+            self._arm_sent_positions.update(left_pos)
+            self._arm_sent_at = time.monotonic()
         left_write_done_t = time.perf_counter()
         if self.right_bus and right_pos:
-            self.right_bus.sync_write("Goal_Position", {k.replace(".pos", ""): v for k, v in right_pos.items()})
+            self.right_bus.sync_write(
+                "Goal_Position", {k.replace(".pos", ""): v for k, v in right_pos.items()}
+            )
+            self._arm_sent_positions.update(right_pos)
+            self._arm_sent_at = time.monotonic()
         right_write_done_t = time.perf_counter()
         self.left_bus.sync_write("Goal_Velocity", base_wheel_goal_vel)
         base_write_done_t = time.perf_counter()
@@ -878,155 +948,217 @@ class AlohaMini(Robot):
 
         return {**left_pos, **right_pos, **base_goal_vel, **lift_sent}
 
-    def _limit_gripper_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
-        """Stop pushing a gripper harder once its measured current exceeds the force limit."""
-        return self._limit_goal_by_current(
-            bus,
-            goal_pos,
-            is_target_motor=lambda key: key.endswith("_gripper.pos"),
-            current_limit_ma=self._gripper_current_limit_ma,
-            release_margin=self._gripper_release_margin,
-            hold_goal_state=self._gripper_hold_goal,
-            hold_direction_state=self._gripper_hold_direction,
-            fixed_direction=self._gripper_open_direction,
-            hold_close_step=self._gripper_hold_close_step,
-            log_tag="GripperCurrentLimit",
-        )
+    def supervise_arm_motion(self) -> RobotAction:
+        """Check active arm targets using fresh feedback; write only safety corrections."""
+        corrections = {}
+        for bus in (self.left_bus, self.right_bus):
+            if bus is None:
+                continue
+            goals = {
+                key: value
+                for key, value in self._arm_goal_positions.items()
+                if key.removesuffix(".pos") in bus.motors
+            }
+            limited = self._limit_gripper_goal_by_current(bus, goals)
+            limited = self._limit_joint_goal_by_current(bus, limited)
+            changed = {
+                key: value for key, value in limited.items() if value != self._arm_sent_positions.get(key)
+            }
+            if changed:
+                bus.sync_write(
+                    "Goal_Position", {key.removesuffix(".pos"): value for key, value in changed.items()}
+                )
+                self._arm_sent_positions.update(changed)
+                self._arm_sent_at = time.monotonic()
+                corrections.update(changed)
+        return corrections
 
-    def _limit_joint_goal_by_current(self, bus, goal_pos: dict[str, float]) -> dict[str, float]:
-        """Freeze a joint after sustained overcurrent; ignore isolated current spikes."""
-        return self._limit_goal_by_current(
-            bus,
-            goal_pos,
-            is_target_motor=lambda key: not key.endswith("_gripper.pos"),
-            current_limit_ma=self._joint_current_limit_ma,
-            release_margin=self._joint_release_margin,
-            hold_goal_state=self._joint_hold_goal,
-            hold_direction_state=self._joint_hold_direction,
-            overcurrent_count_state=self._joint_overcurrent_count,
-            overcurrent_trip_n=self._joint_overcurrent_trip_n,
-            fixed_direction=None,
-            hold_close_step=0.0,
-            log_tag="JointCurrentLimit",
-        )
+    def get_safety_status(self) -> dict[str, Any]:
+        """Snapshot protection and accepted arm targets without bus I/O."""
+        return {
+            "version": 1,
+            "host_session_id": self._safety_session_id,
+            "sampled_at_monotonic_s": time.monotonic(),
+            "joint_hold_events": self._joint_hold_events,
+            "joint_holds": dict(self._joint_hold_goal),
+            "gripper_holds": dict(self._gripper_hold_goal),
+            "requested_targets": dict(self._arm_goal_positions),
+            "accepted_targets": dict(self._arm_sent_positions),
+            "accepted_at_monotonic_s": self._arm_sent_at,
+        }
 
-    def _limit_goal_by_current(
-        self,
-        bus,
-        goal_pos: dict[str, float],
-        *,
-        is_target_motor,
-        current_limit_ma: float,
-        release_margin: float,
-        hold_goal_state: dict[str, float],
-        hold_direction_state: dict[str, float],
-        fixed_direction: dict[str, float] | None,
-        hold_close_step: float,
-        log_tag: str,
-        overcurrent_count_state: dict[str, int] | None = None,
-        overcurrent_trip_n: int = 1,
+    def _limit_gripper_goal_by_current(
+        self, bus: FeetechMotorsBus, goal_pos: dict[str, float]
     ) -> dict[str, float]:
-        """Freeze a motor's goal once its current exceeds the limit, holding there until the
-        caller's own goal asks to move back past the held position.
-
-        fixed_direction is a per-motor mechanical constant for deciding whether a
-        gripper command is closing and should retain a small squeeze. The direction
-        that releases any hold is always inferred from the command that caused it, so
-        reversing works after contact at either endpoint.
-        """
-        target_keys = [key for key in goal_pos if is_target_motor(key) and key.replace(".pos", "") in bus.motors]
+        """Stop pushing a gripper harder once its measured current exceeds the force limit."""
+        target_keys = [
+            key for key in goal_pos if key.endswith("_gripper.pos") and key.replace(".pos", "") in bus.motors
+        ]
         if not target_keys:
             return goal_pos
 
         target_motors = [key.replace(".pos", "") for key in target_keys]
-        currents_raw = {
-            motor: self._feedback_currents_raw[motor]
-            for motor in target_motors
-            if motor in self._feedback_currents_raw
-        }
-        present_pos = {
-            motor: self._feedback_positions[motor]
-            for motor in target_motors
-            if motor in self._feedback_positions
-        }
-        if len(currents_raw) != len(target_motors) or len(present_pos) != len(target_motors):
-            try:
-                currents_raw = bus.sync_read("Present_Current", target_motors)
-                present_pos = bus.sync_read("Present_Position", target_motors)
-            except Exception as e:
-                logger.warning("Failed to read %s current/position for force limiting: %s", log_tag, e)
-                return goal_pos
+        feedback = self._read_force_feedback(bus, target_motors, "GripperCurrentLimit")
+        if feedback is None:
+            return {
+                key: self._gripper_hold_goal.get(key.removesuffix(".pos"), value)
+                for key, value in goal_pos.items()
+            }
+        currents_raw, present_pos = feedback
 
         limited_goal_pos = dict(goal_pos)
         for goal_key in target_keys:
             motor = goal_key.replace(".pos", "")
             goal = float(limited_goal_pos[goal_key])
             present = float(present_pos[motor])
-            current_ma = abs(float(currents_raw.get(motor, 0.0)) * 6.5)
 
-            if motor not in hold_goal_state:
-                if current_ma < current_limit_ma:
-                    if overcurrent_count_state is not None:
-                        overcurrent_count_state.pop(motor, None)
+            if motor not in self._gripper_hold_goal:
+                current_ma = abs(float(currents_raw[motor]) * _CURRENT_MA_PER_RAW_UNIT)
+                if current_ma < self._gripper_current_limit_ma:
                     continue
-                if overcurrent_count_state is not None:
-                    count = overcurrent_count_state.get(motor, 0) + 1
-                    overcurrent_count_state[motor] = count
-                    if count < overcurrent_trip_n:
-                        continue
-                    overcurrent_count_state.pop(motor, None)
+
                 command_delta = goal - present
+                open_direction = self._gripper_open_direction.get(motor, 1.0)
                 if command_delta > 0.0:
                     release_direction = -1.0
                 elif command_delta < 0.0:
                     release_direction = 1.0
                 else:
-                    release_direction = (
-                        fixed_direction.get(motor, 1.0)
-                        if fixed_direction is not None
-                        else 1.0
-                    )
-                if fixed_direction is not None:
-                    open_direction = fixed_direction.get(motor, 1.0)
-                    is_closing = command_delta * open_direction < 0.0
-                    # Retain a small squeeze only for a closing contact. At the open
-                    # mechanical endpoint, hold at present instead of pushing harder.
-                    hold_goal = (
-                        min(
-                            100.0,
-                            max(0.0, present - open_direction * hold_close_step),
-                        )
-                        if is_closing
-                        else present
+                    release_direction = open_direction
+                if command_delta * open_direction < 0.0:
+                    hold_goal = min(
+                        100.0,
+                        max(
+                            0.0,
+                            present - open_direction * self._gripper_hold_close_step,
+                        ),
                     )
                 else:
                     hold_goal = present
-                hold_goal_state[motor] = hold_goal
-                hold_direction_state[motor] = release_direction
-                print(
-                    f"[{log_tag}] {motor}: {current_ma:.1f} mA >= {current_limit_ma:.1f} mA; "
-                    f"holding at position {hold_goal:.2f} (present={present:.2f})"
+                self._gripper_hold_goal[motor] = hold_goal
+                self._gripper_hold_direction[motor] = release_direction
+                logger.warning(
+                    "Gripper contact hold: %s, %.1f mA, position=%.2f",
+                    motor,
+                    current_ma,
+                    hold_goal,
                 )
 
-            hold_goal = hold_goal_state[motor]
-            release_direction = hold_direction_state[motor]
-
-            # Only hand control back once the caller's own goal asks to move past where
-            # we're holding, in the direction away from what triggered the hold. Current
-            # alone can't signal "let go": holding at/near present already drops the
-            # current toward ~0 regardless of whether the object/obstacle is still there.
-            if (goal - hold_goal) * release_direction >= release_margin:
-                hold_goal_state.pop(motor, None)
-                hold_direction_state.pop(motor, None)
-                print(
-                    f"[{log_tag}] {motor}: goal {goal:.2f} past held position {hold_goal:.2f}; releasing hold."
-                )
+            hold_goal = self._gripper_hold_goal[motor]
+            release_direction = self._gripper_hold_direction[motor]
+            if (goal - hold_goal) * release_direction >= self._gripper_release_margin:
+                self._gripper_hold_goal.pop(motor, None)
+                self._gripper_hold_direction.pop(motor, None)
                 continue
 
             limited_goal_pos[goal_key] = hold_goal
 
         return limited_goal_pos
 
+    def _limit_joint_goal_by_current(
+        self, bus: FeetechMotorsBus, goal_pos: dict[str, float]
+    ) -> dict[str, float]:
+        """Hold joints that draw high current without moving toward their target."""
+        target_keys = [
+            key
+            for key in goal_pos
+            if not key.endswith("_gripper.pos") and key.replace(".pos", "") in bus.motors
+        ]
+        if not target_keys:
+            return goal_pos
+
+        target_motors = [key.replace(".pos", "") for key in target_keys]
+        feedback = self._read_force_feedback(bus, target_motors, "JointStallLimit")
+        if feedback is None:
+            return {
+                key: self._joint_hold_goal.get(key.removesuffix(".pos"), value)
+                for key, value in goal_pos.items()
+            }
+        currents_raw, present_pos = feedback
+
+        limited_goal_pos = dict(goal_pos)
+        now = time.monotonic()
+        for goal_key in target_keys:
+            motor = goal_key.replace(".pos", "")
+            goal = float(limited_goal_pos[goal_key])
+            present = float(present_pos[motor])
+
+            if motor not in self._joint_hold_goal:
+                current_ma = abs(float(currents_raw[motor]) * _CURRENT_MA_PER_RAW_UNIT)
+                command_error = _position_delta_degrees(bus, motor, goal - present)
+                current_limit_ma = self._current_limits[motor].collision_ma
+                if current_ma < current_limit_ma or abs(command_error) < _JOINT_STALL_MIN_COMMAND_ERROR_DEG:
+                    self._joint_stall_candidates.pop(motor, None)
+                    continue
+
+                command_direction = 1.0 if command_error > 0.0 else -1.0
+                candidate = self._joint_stall_candidates.get(motor)
+                if candidate is None or candidate.command_direction != command_direction:
+                    self._joint_stall_candidates[motor] = _JointStallCandidate(
+                        now, present, command_direction
+                    )
+                    continue
+
+                progress = (
+                    _position_delta_degrees(bus, motor, present - candidate.start_position)
+                    * command_direction
+                )
+                if progress >= _JOINT_STALL_MIN_PROGRESS_DEG:
+                    self._joint_stall_candidates[motor] = _JointStallCandidate(
+                        now, present, command_direction
+                    )
+                    continue
+                if now - candidate.started_at < _JOINT_COLLISION_DURATION_S:
+                    continue
+
+                self._joint_hold_goal[motor] = present
+                self._joint_hold_events += 1
+                self._joint_hold_direction[motor] = -command_direction
+                self._joint_stall_candidates.pop(motor, None)
+                logger.warning(
+                    "Joint stall hold: %s, %.1f mA, error=%.2f deg, progress=%.2f deg, position=%.2f",
+                    motor,
+                    current_ma,
+                    command_error,
+                    progress,
+                    present,
+                )
+
+            hold_goal = self._joint_hold_goal[motor]
+            release_direction = self._joint_hold_direction[motor]
+            if (goal - hold_goal) * release_direction >= self._joint_release_margin:
+                self._joint_hold_goal.pop(motor, None)
+                self._joint_hold_direction.pop(motor, None)
+                continue
+
+            limited_goal_pos[goal_key] = hold_goal
+
+        return limited_goal_pos
+
+    def _read_force_feedback(
+        self, bus: FeetechMotorsBus, motors: list[str], log_tag: str
+    ) -> tuple[dict[str, float], dict[str, float]] | None:
+        currents_raw = {
+            motor: self._feedback_currents_raw[motor]
+            for motor in motors
+            if motor in self._feedback_currents_raw
+        }
+        present_pos = {
+            motor: self._feedback_positions[motor] for motor in motors if motor in self._feedback_positions
+        }
+        if len(currents_raw) == len(motors) and len(present_pos) == len(motors):
+            return currents_raw, present_pos
+
+        try:
+            return (
+                bus.sync_read("Present_Current", motors),
+                bus.sync_read("Present_Position", motors),
+            )
+        except Exception as e:
+            for motor in motors:
+                self._joint_stall_candidates.pop(motor, None)
+            logger.warning("Failed to read %s current/position: %s", log_tag, e)
+            return None
 
     def stop_base(self):
         self.left_bus.sync_write("Goal_Velocity", dict.fromkeys(self.base_motors, 0), num_retry=0)
@@ -1040,10 +1172,13 @@ class AlohaMini(Robot):
         self.stop_base()
         self.stop_lift()
 
-    def read_and_check_currents(self, limit_ma, print_currents, *, raw: bool = False):
-        """Read left/right bus currents (mA), print them, and enforce overcurrent protection"""
-        scale = 6.5  # sts3215 current unit conversion factor
-        left_curr_raw = {}
+    def read_and_check_currents(
+        self,
+        print_currents: bool = False,
+        *,
+        raw: bool = False,
+    ) -> dict[str, float]:
+        """Read motor currents and enforce model-aware, frequency-independent protection."""
         left_curr_raw = self.left_bus.sync_read("Present_Current", list(self.left_bus.motors.keys()))
         right_curr_raw = {}
         if getattr(self, "right_bus", None):
@@ -1051,49 +1186,65 @@ class AlohaMini(Robot):
 
         now = time.monotonic()
         if print_currents and (now - self._last_currents_log_t >= 1.0):
-            left_arr = [int(float(raw) * scale) for raw in left_curr_raw.values()]
-            print(f"[Currents][left_bus] {left_arr}")
+            left_arr = [int(float(value) * _CURRENT_MA_PER_RAW_UNIT) for value in left_curr_raw.values()]
+            logger.info("[Currents][left_bus] %s", left_arr)
             if right_curr_raw:
-                right_arr = [int(float(raw) * scale) for raw in right_curr_raw.values()]
-                print(f"[Currents][right_bus] {right_arr}")
+                right_arr = [
+                    int(float(value) * _CURRENT_MA_PER_RAW_UNIT) for value in right_curr_raw.values()
+                ]
+                logger.info("[Currents][right_bus] %s", right_arr)
             self._last_currents_log_t = now
 
         tripped = None
-        for name, raw in {**left_curr_raw, **right_curr_raw}.items():
-            current_ma = float(raw) * scale
+        combined_raw = {**left_curr_raw, **right_curr_raw}
+        for name, value in combined_raw.items():
+            current_ma = abs(float(value) * _CURRENT_MA_PER_RAW_UNIT)
+            limits = self._current_limits[name]
 
-            if current_ma > limit_ma:
-                self._overcurrent_count[name] = self._overcurrent_count.get(name, 0) + 1
-                print(f"[Overcurrent] {name}: {current_ma:.1f} mA > {limit_ma:.1f} mA ")
-            else:
-                # reset when it goes back to normal -> "consecutive" semantics
-                self._overcurrent_count[name] = 0
+            if current_ma < limits.collision_ma:
+                self._joint_stall_candidates.pop(name, None)
 
-            if self._overcurrent_count[name] >= self._overcurrent_trip_n:
-                tripped = (name, current_ma, self._overcurrent_count[name])
+            for limit_ma, duration_s, timer, cause in (
+                (
+                    limits.near_stall_ma,
+                    _NEAR_STALL_OVERCURRENT_DURATION_S,
+                    self._near_stall_overcurrent_started_at,
+                    "near-stall current",
+                ),
+                (
+                    limits.sustained_ma,
+                    _SUSTAINED_OVERCURRENT_DURATION_S,
+                    self._sustained_overcurrent_started_at,
+                    "sustained overload",
+                ),
+            ):
+                if _has_sustained_overcurrent(timer, name, current_ma, limit_ma, now, duration_s):
+                    tripped = (name, current_ma, limit_ma, duration_s, cause)
+                    break
+            if tripped is not None:
                 break
 
         if tripped is not None:
-            name, current_ma, n = tripped
-            print(
-                f"[Overcurrent] {name}: {current_ma:.1f} mA > {limit_ma:.1f} mA "
-                f"for {n} consecutive reads, disconnecting!"
+            name, current_ma, current_limit_ma, duration_s, cause = tripped
+            logger.error(
+                "Overcurrent: %s, %s, %.1f mA >= %.1f mA for %.0f ms; disconnecting",
+                name,
+                cause,
+                current_ma,
+                current_limit_ma,
+                duration_s * 1000,
             )
-            try:
+            with suppress(Exception):
                 self.stop_motion()
-            except Exception:
-                pass
             try:
                 self.disconnect()
             except Exception as e:
-                print(f"[Overcurrent] disconnect error: {e}")
+                logger.error("Overcurrent disconnect failed: %s", e)
             sys.exit(1)
 
-
-        combined_raw = {**left_curr_raw, **right_curr_raw}
         if raw:
             return combined_raw
-        return {k: round(v * scale, 1) for k, v in combined_raw.items()}
+        return {k: round(v * _CURRENT_MA_PER_RAW_UNIT, 1) for k, v in combined_raw.items()}
 
     @check_if_not_connected
     def disconnect(self):

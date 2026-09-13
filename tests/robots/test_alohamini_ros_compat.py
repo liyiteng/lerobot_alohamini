@@ -170,6 +170,7 @@ def test_robot_metadata_describes_normalization_and_lift_limits() -> None:
         ),
         right_bus=None,
         config=SimpleNamespace(robot_model="alohamini2pro"),
+        cameras={},
         lift=SimpleNamespace(
             cfg=SimpleNamespace(
                 soft_min_mm=0.0,

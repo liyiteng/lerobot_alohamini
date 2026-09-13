@@ -151,6 +151,52 @@ port 5557, add `--camera-stream` to the selected Host command.
 ROS state requests on port 5556 omit camera acquisition, while legacy LeRobot
 clients keep receiving the same state-plus-image multipart response.
 
+Motor-current protection uses the actuator ratings below:
+
+| Model | Rated | Stall | Collision hold | Sustained stop | Near-stall stop |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| STS3215 | 0.9 A | 2.7 A | 1.35 A | 1.8 A | 2.16 A |
+| STS3095 | 2.2 A | 9.8 A | 3.3 A | 4.4 A | 7.84 A |
+| STS3250 | 1.4 A | 4.2 A | 2.1 A | 2.8 A | 3.36 A |
+
+Collision hold requires the current threshold, at least 2° of command error, and
+less than 0.2° of progress toward the target over 150 ms. Position differences are
+converted to degrees using the motor calibration, including when commands use
+normalized coordinates. Reverse the target past the held position to release a hold.
+The Host supervises active targets every control cycle, including cycles without
+new commands, and writes a safety correction only when the held target changes.
+Sustained overload stops the robot after 650 ms; near-stall current stops it after
+80 ms. Durations use elapsed time; detection occurs on the next feedback sample.
+The gripper's separate 0.5 A threshold controls contact force.
+
+The Host grants control to the first command client and rejects other writers.
+After that client stops sending for the watchdog interval (1 second by default),
+the Host stops motion before releasing control. Stop the current controller and
+wait for release before starting another. State-only observers do not acquire
+control. Updated clients identify commands and bind them to the Host session and
+control epoch. Upgrade the Host and command clients together. Identified commands
+without the current epoch are rejected. PC commands require complete feedback
+from a request sent within the last 250 ms; a missing response stops new commands.
+Legacy unidentified commands remain supported as one shared legacy controller;
+do not run multiple legacy command clients together.
+Legacy commands cannot provide session/epoch replay protection.
+
+Synchronous evaluation refreshes expired feedback after inference, discarding
+responses prefetched before the calculation. The 250 ms feedback limit is not
+an inference deadline. Fresh feedback must still confirm the same safe control
+session; a watchdog event, joint protection, Host restart or ownership change
+pauses evaluation and discards queued actions until explicit recovery. No
+heartbeat commands are sent during inference to bypass the Host watchdog.
+
+Camera warnings follow the Host's enabled-camera list and appear once per missing-image
+episode. State-only responses do not trigger missing-image warnings. Older Hosts without
+camera metadata use the client configuration. Cached and placeholder images do not gain
+fresh capture timestamps. Observation metadata includes sampled motor currents in mA.
+
+Temporary ZMQ send-queue backpressure defers observation requests to a later cycle;
+it does not block control or register unsent requests. Other transport errors remain
+visible, and unavailable feedback still prevents new commands.
+
 ---
 
 ## 6. Dataset Recording

@@ -6,27 +6,30 @@ import math
 import time
 
 import lerobot.robots.alohamini  # noqa: F401 — registers alohamini_client robot type
-
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets import aggregate_pipeline_dataset_features, create_initial_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.policies.rtc.configuration_rtc import RTCConfig
 from lerobot.processor import make_default_processors
+from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.rollout.inference.factory import (
     RTCInferenceConfig,
     SyncInferenceConfig,
     create_inference_engine,
 )
 from lerobot.rollout.robot_wrapper import ThreadSafeRobot
-from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.utils.action_interpolator import ActionInterpolator
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.device_utils import auto_select_torch_device
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
-from lerobot.utils.visualization_utils import init_rerun
+
+try:
+    from .evaluation_safety import EvaluationSafetyGuard, hold_action, stop_inference
+except ImportError:
+    from evaluation_safety import EvaluationSafetyGuard, hold_action, stop_inference
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -62,7 +65,9 @@ def main():
         default="robot task",
     )
     parser.add_argument("--policy.path", "--hf_model_id", dest="policy_path", type=str, required=True)
-    parser.add_argument("--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, required=True)
+    parser.add_argument(
+        "--dataset.repo_id", "--hf_dataset_id", dest="dataset_repo_id", type=str, required=True
+    )
     parser.add_argument(
         "--dataset.push_to_hub",
         dest="push_to_hub",
@@ -139,9 +144,9 @@ def main():
     # lerobot.rollout.context.build_rollout_context) ===
     if args.inference_type == "rtc":
         predict_chunk_params = inspect.signature(policy_class.predict_action_chunk).parameters
-        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(predict_chunk_params) or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values()
-        )
+        accepts_rtc_kwargs = {"inference_delay", "prev_chunk_left_over"}.issubset(
+            predict_chunk_params
+        ) or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in predict_chunk_params.values())
         if not accepts_rtc_kwargs:
             raise ValueError(
                 f"Policy type '{policy_cfg.type}' does not support RTC inference: "
@@ -164,8 +169,9 @@ def main():
     policy.eval()
 
     # === Robot ===
-    robot_config = AlohaMiniClientConfig(remote_ip=args.remote_ip, id=args.robot_id,
-                                         robot_model=args.robot_model)
+    robot_config = AlohaMiniClientConfig(
+        remote_ip=args.remote_ip, id=args.robot_id, robot_model=args.robot_model
+    )
     robot = AlohaMiniClient(robot_config)
     robot.connect()
     robot_wrapper = ThreadSafeRobot(robot)
@@ -224,14 +230,14 @@ def main():
         fps=float(args.fps),
         device=device,
     )
-    engine.start()
 
-    #init_rerun(session_name="alohamini_evaluate")
+    # init_rerun(session_name="alohamini_evaluate")
     log_say("Starting evaluation")
 
     interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
     control_interval = interpolator.get_control_interval(args.fps)
     recorded = 0
+    safety_guard = EvaluationSafetyGuard()
 
     def reset_environment(next_episode: int) -> None:
         """Wait for manual scene reset while draining remote observations."""
@@ -261,52 +267,83 @@ def main():
                 precise_sleep(sleep_t)
         print(flush=True)
 
-    while recorded < args.num_episodes:
-        log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
-        engine.reset()
-        interpolator.reset()
-        engine.resume()
-        start = time.perf_counter()
-        cached_obs_processed = None
+    try:
+        while recorded < args.num_episodes:
+            log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
+            stop_inference(engine)
+            engine.reset()
+            engine.start()
+            interpolator.reset()
+            engine.resume()
+            start = time.perf_counter()
+            cached_obs_processed = None
 
-        while (time.perf_counter() - start) < args.episode_time:
-            loop_start = time.perf_counter()
+            while (time.perf_counter() - start) < args.episode_time:
+                loop_start = time.perf_counter()
 
-            obs_raw = robot.get_observation()
-            if cached_obs_processed is None or interpolator.needs_new_action():
+                obs_raw = robot.get_observation()
+                obs_raw, reason = safety_guard.check_observation(robot, obs_raw)
+                if reason:
+                    paused_at = time.perf_counter()
+                    safety_guard.recover(robot, engine, interpolator, None, obs_raw, reason)
+                    start += time.perf_counter() - paused_at
+                    cached_obs_processed = None
+                    continue
+                if cached_obs_processed is None or interpolator.needs_new_action():
+                    obs_processed = robot_observation_processor(obs_raw)
+                    engine.notify_observation(obs_processed)
+                    cached_obs_processed = obs_processed
+                else:
+                    obs_processed = cached_obs_processed
+                obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+
+                if interpolator.needs_new_action():
+                    action_tensor = engine.get_action(obs_frame)
+                    if action_tensor is not None:
+                        interpolator.add(action_tensor.cpu())
+
+                obs_raw, reason = safety_guard.check_observation(robot, obs_raw)
+                if reason:
+                    paused_at = time.perf_counter()
+                    safety_guard.recover(robot, engine, interpolator, None, obs_raw, reason)
+                    start += time.perf_counter() - paused_at
+                    cached_obs_processed = None
+                    continue
                 obs_processed = robot_observation_processor(obs_raw)
-                engine.notify_observation(obs_processed)
-                cached_obs_processed = obs_processed
-            else:
-                obs_processed = cached_obs_processed
-            obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+                obs_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+                interp_action = interpolator.get()
+                if interp_action is not None:
+                    action_dict = {k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)}
+                    if robot.send_action(robot_action_processor((action_dict, obs_raw))):
+                        action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
+                        dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
 
-            if interpolator.needs_new_action():
-                action_tensor = engine.get_action(obs_frame)
-                if action_tensor is not None:
-                    interpolator.add(action_tensor.cpu())
+                dt = time.perf_counter() - loop_start
+                if (sleep_t := control_interval - dt) > 0:
+                    precise_sleep(sleep_t)
 
-            interp_action = interpolator.get()
-            if interp_action is not None:
-                action_dict = {k: interp_action[i].item() for i, k in enumerate(ordered_action_keys)}
-                robot.send_action(robot_action_processor((action_dict, obs_raw)))
-                action_frame = build_dataset_frame(dataset_features, action_dict, prefix=ACTION)
-                dataset.add_frame({**obs_frame, **action_frame, "task": args.task_description})
-
-            dt = time.perf_counter() - loop_start
-            if (sleep_t := control_interval - dt) > 0:
-                precise_sleep(sleep_t)
-
+            engine.pause()
+            dataset.save_episode()
+            recorded += 1
+            if recorded < args.num_episodes:
+                reset_environment(recorded + 1)
+    finally:
         engine.pause()
-        dataset.save_episode()
-        recorded += 1
-        if recorded < args.num_episodes:
-            reset_environment(recorded + 1)
-
+        try:
+            robot.send_action(hold_action(robot.last_remote_state))
+        finally:
+            try:
+                engine.stop()
+            finally:
+                try:
+                    if dataset.has_pending_frames():
+                        dataset.save_episode()
+                finally:
+                    try:
+                        dataset.finalize()
+                    finally:
+                        robot.disconnect()
     log_say("Evaluation complete")
-    engine.stop()
-    robot.disconnect()
-    dataset.finalize()
     if args.push_to_hub:
         dataset.push_to_hub()
 
