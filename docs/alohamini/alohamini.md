@@ -188,6 +188,21 @@ session; a watchdog event, joint protection, Host restart or ownership change
 pauses evaluation and discards queued actions until explicit recovery. No
 heartbeat commands are sent during inference to bypass the Host watchdog.
 
+### Terminal status
+
+The Host's `--profile_timing` output reports actual Host loop Hz and hardware,
+encoding, and transport timings. Hardware and protection faults remain on the Host.
+
+The teleoperation terminal prints `[TELEOP]` once per second: local loop Hz,
+successfully queued command Hz, feedback/control availability, and joint holds.
+`[TELEOP TRACKING]` shows the largest absolute target-to-feedback gap per arm and
+normalization range, keeping gripper and arm units separate. `target` and `command`
+are Host-reported requested and accepted targets; `measured` is sampled feedback.
+The gap is not a completed-motion error or a protection threshold: the feedback
+can precede the accepted command. Currents come from the same Host observation;
+older Hosts without current telemetry display `n/a`. Stale feedback is not shown
+as live tracking. These reports do not add motor reads or change dataset fields.
+
 ---
 
 ## 6. Dataset Recording

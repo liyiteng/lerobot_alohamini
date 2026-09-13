@@ -180,12 +180,14 @@ def test_robot_metadata_describes_normalization_and_calibration() -> None:
         left_bus=left_bus,
         right_bus=None,
         config=SimpleNamespace(robot_model="alohamini2pro"),
+        cameras={"forward": object(), "wrist_right": object()},
         lift=lift,
     )
 
     metadata = build_robot_metadata(robot)
 
     assert metadata["schema_version"] == 1
+    assert metadata["cameras"] == ["forward", "wrist_right"]
     assert metadata["robot_model"] == "alohamini2pro"
     assert metadata["motors"]["arm_left_shoulder_pan"] == {
         "id": 1,

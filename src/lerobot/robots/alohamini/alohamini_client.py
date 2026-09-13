@@ -73,10 +73,12 @@ class AlohaMiniClient(Robot):
         self._observation_request_id = 0
         self._request_times: dict[bytes, float] = {}
         self._response_requested_at: float | None = None
+        self._response_includes_cameras = False
         self._feedback_valid = False
         self._feedback_requested_at: float | None = None
 
         self.last_frames = {}
+        self._missing_cameras: set[str] = set()
 
         self.last_remote_state = {}
         # Incremented only when a new observation message is successfully decoded.
@@ -216,13 +218,17 @@ class AlohaMiniClient(Robot):
             for token, stamp in self._request_times.items()
             if token in self._observation_request_tokens
         }
-        self._request_times[request_token] = time.monotonic()
+        requested_at = time.monotonic()
 
         try:
             self.zmq_observation_socket.send(request_token, flags=zmq.NOBLOCK)
-        except zmq.ZMQError as e:
-            logging.error(f"ZMQ observation request failed: {e}")
+        except zmq.Again:
+            # A full send queue is temporary backpressure; retry on a later control cycle.
             return None
+        except zmq.ZMQError as e:
+            logging.error("ZMQ observation request failed: %s", e)
+            return None
+        self._request_times[request_token] = requested_at
         return request_token
 
     def _receive_observation_response(self, request_token: bytes, timeout_ms: int) -> list[bytes] | None:
@@ -252,6 +258,7 @@ class AlohaMiniClient(Robot):
                     break
                 if response and response[0] == request_token:
                     self._response_requested_at = self._request_times.pop(request_token, None)
+                    self._response_includes_cameras = not request_token.endswith(b":state")
                     return response[1:]
 
     def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
@@ -338,7 +345,7 @@ class AlohaMiniClient(Robot):
             np_arr = np.frombuffer(jpg_data, dtype=np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is None:
-                logging.warning("cv2.imdecode returned None for an image.")
+                logging.debug("cv2.imdecode returned None for an image.")
             return frame
         except (TypeError, ValueError) as e:
             logging.error(f"Error decoding base64 image data: {e}")
@@ -350,7 +357,7 @@ class AlohaMiniClient(Robot):
             return None
         frame = cv2.imdecode(np.frombuffer(jpg_data, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
-            logging.warning("cv2.imdecode returned None for JPEG bytes.")
+            logging.debug("cv2.imdecode returned None for JPEG bytes.")
         return frame
 
     def _parse_observation_message(
@@ -489,6 +496,8 @@ class AlohaMiniClient(Robot):
             if name in new_frames
         }
         self.latest_robot_metadata = dict(observation.get("_robot_metadata", {}))
+        if self._response_includes_cameras:
+            self._report_missing_cameras(new_frames)
         self.latest_safety_status = dict(observation.get("_safety", {}))
         self._last_safety_received_at = time.monotonic() if self.latest_safety_status else None
         self._observation_sequence += 1
@@ -504,6 +513,24 @@ class AlohaMiniClient(Robot):
 
         return self.last_frames, new_state
 
+    def _report_missing_cameras(self, frames: dict[str, np.ndarray]) -> None:
+        """Report transitions from full responses, not intentionally omitted images."""
+        enabled = self.latest_robot_metadata.get("cameras")
+        if isinstance(enabled, list) and all(isinstance(name, str) for name in enabled):
+            expected = self._cameras_ft.keys() & set(enabled)
+        else:
+            # Older Hosts do not advertise enabled cameras; retain the configured schema.
+            expected = set(self._cameras_ft)
+        missing = expected - frames.keys()
+        for name in sorted(missing - self._missing_cameras):
+            logging.warning(
+                "No image received for camera %s; check Host/client camera configuration and capture.",
+                name,
+            )
+        for name in sorted((self._missing_cameras & expected) - missing):
+            logging.info("Camera %s image reception recovered.", name)
+        self._missing_cameras = missing
+
     @check_if_not_connected
     def get_observation(self, *, include_cameras: bool = True) -> RobotObservation:
         """
@@ -518,7 +545,6 @@ class AlohaMiniClient(Robot):
         for cam_name, (height, width, channels) in self._cameras_ft.items():
             frame = frames.get(cam_name)
             if frame is None:
-                logging.warning("Frame is None for %s; using zeros.", cam_name)
                 frame = np.zeros((height, width, channels), dtype=np.uint8)
             obs_dict[cam_name] = frame
 

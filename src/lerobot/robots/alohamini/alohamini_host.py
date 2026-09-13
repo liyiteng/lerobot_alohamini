@@ -129,6 +129,7 @@ def build_robot_metadata(robot: AlohaMini) -> dict:
         "schema_version": 1,
         "robot_model": robot.config.robot_model,
         "motors": motors,
+        "cameras": list(robot.cameras),
     }
     if getattr(robot, "lift", None) is not None:
         metadata["lift_axis"] = {
@@ -260,7 +261,6 @@ def main():
     target_source = "none"
     has_received_command = False
     latest_action: dict[str, float] = {}
-    last_sent_action: dict[str, float] = {}
     logging.info("Waiting for commands...")
 
     try:
@@ -294,8 +294,7 @@ def main():
             # One feedback snapshot owns the complete observe -> act cycle.
             # send_action() reuses its position/current values for safety limits.
             last_observation = robot.get_observation(include_cameras=include_cameras)
-            # send_action() consumes/clears this cycle's cached feedback. Preserve only
-            # the small current snapshot needed by the once-per-second tracking report.
+            # Preserve sampled currents for client telemetry before send_action() clears the cache.
             tracking_currents_ma = {
                 motor: float(raw) * 6.5 for motor, raw in robot._feedback_currents_raw.items()
             }
@@ -316,9 +315,7 @@ def main():
                 hold_action = {
                     key: float(value) for key, value in last_observation.items() if key.endswith(".pos")
                 }
-                last_sent_action = robot.send_action(
-                    {**hold_action, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
-                )
+                robot.send_action({**hold_action, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
                 robot.stop_motion()
                 has_received_command = False
                 command_owner.release()
@@ -363,11 +360,10 @@ def main():
 
             action_sent = False
             if command_received:
-                last_sent_action = robot.send_action(latest_action)
+                robot.send_action(latest_action)
                 action_sent = True
             elif not watchdog_tripped:
                 safety_corrections = robot.supervise_arm_motion()
-                last_sent_action.update(safety_corrections)
                 if safety_corrections:
                     target_source = "protection"
             action_done_t = time.perf_counter()
@@ -381,6 +377,7 @@ def main():
                     "_robot_metadata": robot_metadata,
                     "_safety": {
                         **robot.get_safety_status(),
+                        "currents_ma": tracking_currents_ma,
                         "watchdog_active": watchdog_active,
                         "watchdog_events": watchdog_events,
                         "command_watchdog_timeout_s": host.watchdog_timeout_ms / 1000,
@@ -511,27 +508,6 @@ def main():
                         f"right_write={action_averages.get('action_right_write', 0.0):.1f} "
                         f"base_write={action_averages.get('action_base_write', 0.0):.1f} "
                         f"total={action_averages.get('action_total', 0.0):.1f}",
-                        flush=True,
-                    )
-                tracking_rows = []
-                for key, command in sorted(last_sent_action.items()):
-                    if not key.endswith(".pos") or key not in last_observation:
-                        continue
-                    measured = float(last_observation[key])
-                    error = float(command) - measured
-                    motor = key.removesuffix(".pos")
-                    tracking_rows.append((motor, float(command), measured, error))
-                max_tracking_error = max((abs(row[3]) for row in tracking_rows), default=0.0)
-                print(f"[HOST TRACKING] max_error={max_tracking_error:.2f}", flush=True)
-                for motor, command, measured, error in tracking_rows:
-                    target = float(latest_action.get(f"{motor}.pos", command))
-                    current = tracking_currents_ma.get(motor)
-                    current_text = "n/a" if current is None else f"{current:+.1f}mA"
-                    print(
-                        f"[HOST TRACKING][{motor}] "
-                        f"target={target:.2f} command={command:.2f} "
-                        f"measured={measured:.2f} error={error:+.2f} "
-                        f"current={current_text}",
                         flush=True,
                     )
                 timing_report_start_t = loop_done_t

@@ -4,8 +4,10 @@ from contextlib import ExitStack
 
 try:
     from .safety_utils import RecordingGate, SafetyRecorder
+    from .teleop_monitor import TeleopMonitor
 except ImportError:
     from safety_utils import RecordingGate, SafetyRecorder
+    from teleop_monitor import TeleopMonitor
 
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
@@ -134,6 +136,7 @@ with ExitStack() as cleanup:
         print("⚠️ Warning: Some devices are not connected! Still running for debug.")
 
     gate = RecordingGate(robot, None, SafetyRecorder(None))
+    monitor = TeleopMonitor(robot)
 
     # Main loop: 50 Hz command/state control with an independent 30 Hz camera cadence.
     next_camera_request_t = time.perf_counter()
@@ -147,6 +150,7 @@ with ExitStack() as cleanup:
                 next_camera_request_t += camera_interval_s
         observation = robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
         if not NO_ROBOT and not gate.state_ready():
+            monitor.update(sent=False)
             precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
             continue
         arm_actions = leader.get_action() if not NO_LEADER else {}
@@ -157,8 +161,10 @@ with ExitStack() as cleanup:
 
         action = {**arm_actions, **base_action, **lift_action}
         if not NO_ROBOT and not robot.send_action(action):
+            monitor.update(sent=False)
             precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
             continue
+        monitor.update(sent=not NO_ROBOT)
         log_rerun_data(observation, action)
 
         precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
