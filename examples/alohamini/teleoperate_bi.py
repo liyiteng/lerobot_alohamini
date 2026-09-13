@@ -1,5 +1,13 @@
 import argparse
 import time
+from contextlib import ExitStack
+
+try:
+    from .safety_utils import RecordingGate, SafetyRecorder
+    from .teleop_monitor import TeleopMonitor
+except ImportError:
+    from safety_utils import RecordingGate, SafetyRecorder
+    from teleop_monitor import TeleopMonitor
 
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
@@ -11,7 +19,11 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 # ============ Parameter Section ============ #
 parser = argparse.ArgumentParser()
 parser.add_argument("--no_robot", action="store_true", help="Do not connect robot, only print actions")
-parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
+parser.add_argument(
+    "--no_leader",
+    action="store_true",
+    help="Do not connect leader arm, only perform keyboard-controlled actions.",
+)
 parser.add_argument("--fps", type=int, default=50, help="Command/control frequency")
 parser.add_argument(
     "--camera-fps",
@@ -101,49 +113,58 @@ keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 keyboard = KeyboardTeleop(keyboard_config)
 robot = AlohaMiniClient(robot_config)
 
-# Connection logic
-if not NO_ROBOT:
-    robot.connect()
-else:
-    print("🧪 robot.connect() skipped, only printing actions.")
-
-if not NO_LEADER:
-    leader.connect()
-else:
-    print("🧪 robot.connect() skipped, only printing actions.")
-
-keyboard.connect()
-
-
-
-init_rerun(session_name="alohamini_teleop")
-
-if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
-    print("⚠️ Warning: Some devices are not connected! Still running for debug.")
-
-# Main loop: 50 Hz command/state control with an independent 30 Hz camera cadence.
-next_camera_request_t = time.perf_counter()
-camera_interval_s = 1.0 / CAMERA_FPS
-while True:
-    t0 = time.perf_counter()
-
-    request_cameras = t0 >= next_camera_request_t
-    if request_cameras:
-        while next_camera_request_t <= t0:
-            next_camera_request_t += camera_interval_s
-    observation = (
-        robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
-    )
-    arm_actions = leader.get_action() if not NO_LEADER else {}
-    arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
-    keyboard_keys = keyboard.get_action()
-    base_action = robot._from_keyboard_to_base_action(keyboard_keys)
-    lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
-
-    action = {**arm_actions, **base_action, **lift_action}
-    log_rerun_data(observation, action)
-
+with ExitStack() as cleanup:
+    # Connection logic
     if not NO_ROBOT:
-        robot.send_action(action)
+        robot.connect()
+        cleanup.callback(robot.disconnect)
+    else:
+        print("🧪 robot.connect() skipped, only printing actions.")
 
-    precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+    if not NO_LEADER:
+        leader.connect()
+        cleanup.callback(leader.disconnect)
+    else:
+        print("🧪 robot.connect() skipped, only printing actions.")
+
+    keyboard.connect()
+    cleanup.callback(keyboard.disconnect)
+
+    init_rerun(session_name="alohamini_teleop")
+
+    if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
+        print("⚠️ Warning: Some devices are not connected! Still running for debug.")
+
+    gate = RecordingGate(robot, None, SafetyRecorder(None))
+    monitor = TeleopMonitor(robot)
+
+    # Main loop: 50 Hz command/state control with an independent 30 Hz camera cadence.
+    next_camera_request_t = time.perf_counter()
+    camera_interval_s = 1.0 / CAMERA_FPS
+    while True:
+        t0 = time.perf_counter()
+
+        request_cameras = t0 >= next_camera_request_t
+        if request_cameras:
+            while next_camera_request_t <= t0:
+                next_camera_request_t += camera_interval_s
+        observation = robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
+        if not NO_ROBOT and not gate.state_ready():
+            monitor.update(sent=False)
+            precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+            continue
+        arm_actions = leader.get_action() if not NO_LEADER else {}
+        arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
+        keyboard_keys = keyboard.get_action()
+        base_action = robot._from_keyboard_to_base_action(keyboard_keys)
+        lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
+
+        action = {**arm_actions, **base_action, **lift_action}
+        if not NO_ROBOT and not robot.send_action(action):
+            monitor.update(sent=False)
+            precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+            continue
+        monitor.update(sent=not NO_ROBOT)
+        log_rerun_data(observation, action)
+
+        precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))

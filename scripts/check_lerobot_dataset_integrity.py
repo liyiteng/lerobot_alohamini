@@ -138,7 +138,76 @@ class IntegrityChecker:
         self._check_episode_correspondence()
         self._check_video_correspondence()
         self._check_unreferenced_files()
+        self._check_safety_sidecars()
         return self.report()
+
+    def _check_safety_sidecars(self) -> None:
+        if any(self.root.joinpath("meta/recovery").glob("*.json")):
+            self.error("EPISODE_RECOVERY_PENDING", "An interrupted episode save requires recovery")
+        directory = self.root / "meta/safety"
+        if not directory.exists() and not self.info.get("safety_format"):
+            return
+        seen = set()
+        for path in sorted(directory.glob("episode_*.jsonl")):
+            try:
+                episode = int(path.stem.removeprefix("episode_"))
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                if any(not isinstance(row, dict) or row.get("episode_index") != episode for row in rows):
+                    raise ValueError("episode_index does not match the sidecar filename")
+                if episode not in self.data_episodes:
+                    raise ValueError("sidecar has no corresponding data episode")
+                if any(
+                    row.get(key) is not None and not isinstance(row[key], dict)
+                    for row in rows
+                    for key in ("safety", "event", "issued_command", "requested_action")
+                ):
+                    raise ValueError("sidecar metadata fields must be objects")
+                seen.add(episode)
+                frames = [row for row in rows if row.get("frame_index") is not None]
+                if any(type(row["frame_index"]) is not int for row in frames):
+                    raise ValueError("frame_index must be an integer")
+                expected = list(range(self.data_episodes[episode].count))
+                if [row["frame_index"] for row in frames] != expected:
+                    self.warning(
+                        "SAFETY_FRAME_COVERAGE",
+                        f"Episode {episode}: safety frames are missing or out of order",
+                    )
+                closing = (rows[-1].get("event") or {}) if rows else {}
+                if (
+                    closing.get("type") != "recorder_closed"
+                    or closing.get("dropped_records") != 0
+                    or closing.get("frame_count") != len(expected)
+                ):
+                    self.warning(
+                        "SAFETY_LOG_INCOMPLETE", f"Episode {episode}: safety log completeness is unverified"
+                    )
+                previous = None
+                for row in frames:
+                    stamp = float(row["client_monotonic_s"])
+                    if not math.isfinite(stamp):
+                        raise ValueError("non-finite capture time")
+                    if previous is not None and (
+                        stamp <= previous or stamp - previous > max(0.1, 2 / self.info["fps"])
+                    ):
+                        self.warning(
+                            "SAFETY_TIME_GAP",
+                            f"Episode {episode}, frame {row['frame_index']}: capture time discontinuity",
+                        )
+                    previous = stamp
+                if any(
+                    (row.get("safety") or {}).get("joint_holds")
+                    or (row.get("safety") or {}).get("watchdog_active")
+                    or ((row.get("event") or {}).get("type") not in (None, "recorder_closed"))
+                    for row in rows
+                ):
+                    self.warning(
+                        "SAFETY_REVIEW_REQUIRED",
+                        f"Episode {episode}: protection or capture/recovery events require review",
+                    )
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.error("SAFETY_SIDECAR_INVALID", f"{path}: {error}")
+        for episode in sorted(set(self.data_episodes) - seen):
+            self.warning("SAFETY_SIDECAR_MISSING", f"Episode {episode}: no safety sidecar")
 
     def report(self) -> dict[str, Any]:
         errors = sum(issue.severity == "error" for issue in self.issues)
@@ -146,6 +215,9 @@ class IntegrityChecker:
         return {
             "dataset_root": str(self.root),
             "valid": errors == 0,
+            "training_review": "required"
+            if errors or any(issue.code.startswith("SAFETY_") for issue in self.issues)
+            else "not_assessed",
             "errors": errors,
             "warnings": warnings,
             "summary": {
@@ -854,6 +926,17 @@ class DatasetRepairer:
         write_stats(aggregate_stats(all_episode_stats), self.metadata_stage)
 
     def _write_info_and_tasks(self) -> dict[str, Any]:
+        for old_id, new_id in self.mapping.items():
+            source = self.source / "meta/safety" / f"episode_{old_id:06d}.jsonl"
+            if source.exists():
+                destination = self.metadata_stage / "meta/safety" / f"episode_{new_id:06d}.jsonl"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with source.open() as reader, destination.open("w") as writer:
+                    for line in reader:
+                        row = json.loads(line)
+                        row["episode_index"] = new_id
+                        # Repairs retain all frames within each episode; local indices and times stay unchanged.
+                        writer.write(json.dumps(row, ensure_ascii=False) + "\n")
         tasks_source = self.source / "meta/tasks.parquet"
         tasks_destination = self.metadata_stage / "meta/tasks.parquet"
         tasks_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1060,7 @@ def print_report(report: dict[str, Any]) -> None:
         print(f"[{issue['severity'].upper()}] {issue['code']}: {issue['message']}")
     status = "VALID" if report["valid"] else "INVALID"
     print(f"Result: {status} ({report['errors']} errors, {report['warnings']} warnings)")
+    print(f"Training review: {report['training_review']} (structural validity is not training approval)")
 
 
 def main() -> None:

@@ -27,6 +27,7 @@ import zmq
 
 from .alohamini import AlohaMini
 from .camera_stream import CameraStreamPublisher
+from .command_owner import CommandOwner
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 
 
@@ -128,6 +129,7 @@ def build_robot_metadata(robot: AlohaMini) -> dict:
         "schema_version": 1,
         "robot_model": robot.config.robot_model,
         "motors": motors,
+        "cameras": list(robot.cameras),
     }
     if getattr(robot, "lift", None) is not None:
         metadata["lift_axis"] = {
@@ -253,9 +255,12 @@ def main():
 
     last_cmd_time = time.monotonic()
     watchdog_active = False
+    watchdog_events = 0
+    last_command_metadata = {}
+    command_owner = CommandOwner()
+    target_source = "none"
     has_received_command = False
     latest_action: dict[str, float] = {}
-    last_sent_action: dict[str, float] = {}
     logging.info("Waiting for commands...")
 
     try:
@@ -289,64 +294,78 @@ def main():
             # One feedback snapshot owns the complete observe -> act cycle.
             # send_action() reuses its position/current values for safety limits.
             last_observation = robot.get_observation(include_cameras=include_cameras)
-            # send_action() consumes/clears this cycle's cached feedback. Preserve only
-            # the small current snapshot needed by the once-per-second tracking report.
+            # Preserve sampled currents for client telemetry before send_action() clears the cache.
             tracking_currents_ma = {
                 motor: float(raw) * 6.5 for motor, raw in robot._feedback_currents_raw.items()
             }
             observation_done_t = time.perf_counter()
 
+            # Expire the lease before reading queued commands, including the same owner's.
+            watchdog_tripped = (
+                has_received_command
+                and time.monotonic() - last_cmd_time > host.watchdog_timeout_ms / 1000
+                and not watchdog_active
+            )
+            if watchdog_tripped:
+                logging.warning("Host command watchdog expired; stopping motion")
+                watchdog_active = True
+                watchdog_events += 1
+                target_source = "watchdog"
+                last_command_metadata = {}
+                hold_action = {
+                    key: float(value) for key, value in last_observation.items() if key.endswith(".pos")
+                }
+                robot.send_action({**hold_action, "x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+                robot.stop_motion()
+                has_received_command = False
+                command_owner.release()
+
             try:
                 msg = host.zmq_cmd_socket.recv_string(zmq.NOBLOCK)
                 data = dict(json.loads(msg))
+                command_metadata = data.pop("_command", {})
+                if not isinstance(command_metadata, dict):
+                    raise ValueError("Invalid command metadata")
+                if command_metadata and (
+                    not isinstance(command_metadata.get("client_id"), str)
+                    or command_metadata.get("client_id") in {"", "legacy"}
+                    or len(command_metadata["client_id"]) > 64
+                    or type(command_metadata.get("sequence")) is not int
+                    or command_metadata["sequence"] < 0
+                ):
+                    raise ValueError("Invalid command identity")
                 validated_action = {}
                 for key, value in data.items():
                     numeric_value = float(value)
-                    if not math.isfinite(numeric_value):
-                        logging.warning("Ignoring non-finite action %s=%s", key, value)
-                        continue
+                    if key not in robot.action_features or not math.isfinite(numeric_value):
+                        raise ValueError(f"Invalid actuator target: {key}")
                     validated_action[key] = numeric_value
                 if not validated_action:
                     raise ValueError("Received command contains no finite numeric action values.")
-                latest_action = validated_action
-                command_received = True
-                has_received_command = True
-                last_cmd_time = time.monotonic()
-                watchdog_active = False
+                if not watchdog_tripped and command_owner.accept(
+                    command_metadata, robot.get_safety_status()["host_session_id"]
+                ):
+                    latest_action = validated_action
+                    last_command_metadata = command_metadata
+                    target_source = "command"
+                    command_received = True
+                    has_received_command = True
+                    last_cmd_time = time.monotonic()
+                    watchdog_active = False
             except zmq.Again:
                 pass
             except Exception as e:
                 logging.exception("Message fetching failed: %s", e)
             command_done_t = time.perf_counter()
 
-            now = time.monotonic()
-            if (
-                has_received_command
-                and now - last_cmd_time > host.watchdog_timeout_ms / 1000
-                and not watchdog_active
-            ):
-                logging.warning(
-                    f"Command not received for more than {host.watchdog_timeout_ms} milliseconds. Stopping robot motion."
-                )
-                watchdog_active = True
-                hold_action = {
-                    key: float(value) for key, value in last_observation.items() if key.endswith(".pos")
-                }
-                last_sent_action = robot.send_action(
-                    {
-                        **hold_action,
-                        "x.vel": 0.0,
-                        "y.vel": 0.0,
-                        "theta.vel": 0.0,
-                    }
-                )
-                robot.stop_motion()
-                has_received_command = False
-
             action_sent = False
             if command_received:
-                last_sent_action = robot.send_action(latest_action)
+                robot.send_action(latest_action)
                 action_sent = True
+            elif not watchdog_tripped:
+                safety_corrections = robot.supervise_arm_motion()
+                if safety_corrections:
+                    target_source = "protection"
             action_done_t = time.perf_counter()
 
             encoding_timings_ms: dict[str, float] = {}
@@ -356,6 +375,17 @@ def main():
                 response_observation = {
                     **last_observation,
                     "_robot_metadata": robot_metadata,
+                    "_safety": {
+                        **robot.get_safety_status(),
+                        "currents_ma": tracking_currents_ma,
+                        "watchdog_active": watchdog_active,
+                        "watchdog_events": watchdog_events,
+                        "command_watchdog_timeout_s": host.watchdog_timeout_ms / 1000,
+                        "command": dict(last_command_metadata),
+                        "control_owner": command_owner.owner,
+                        "control_epoch": command_owner.epoch,
+                        "target_source": target_source,
+                    },
                 }
                 response_timings_ms: dict[str, float] = {}
                 if encoded_camera_keys:
@@ -478,27 +508,6 @@ def main():
                         f"right_write={action_averages.get('action_right_write', 0.0):.1f} "
                         f"base_write={action_averages.get('action_base_write', 0.0):.1f} "
                         f"total={action_averages.get('action_total', 0.0):.1f}",
-                        flush=True,
-                    )
-                tracking_rows = []
-                for key, command in sorted(last_sent_action.items()):
-                    if not key.endswith(".pos") or key not in last_observation:
-                        continue
-                    measured = float(last_observation[key])
-                    error = float(command) - measured
-                    motor = key.removesuffix(".pos")
-                    tracking_rows.append((motor, float(command), measured, error))
-                max_tracking_error = max((abs(row[3]) for row in tracking_rows), default=0.0)
-                print(f"[HOST TRACKING] max_error={max_tracking_error:.2f}", flush=True)
-                for motor, command, measured, error in tracking_rows:
-                    target = float(latest_action.get(f"{motor}.pos", command))
-                    current = tracking_currents_ma.get(motor)
-                    current_text = "n/a" if current is None else f"{current:+.1f}mA"
-                    print(
-                        f"[HOST TRACKING][{motor}] "
-                        f"target={target:.2f} command={command:.2f} "
-                        f"measured={measured:.2f} error={error:+.2f} "
-                        f"current={current_text}",
                         flush=True,
                     )
                 timing_report_start_t = loop_done_t

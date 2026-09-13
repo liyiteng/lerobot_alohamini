@@ -151,6 +151,69 @@ port 5557, add `--camera-stream` to the selected Host command.
 ROS state requests on port 5556 omit camera acquisition, while legacy LeRobot
 clients keep receiving the same state-plus-image multipart response.
 
+Motor-current protection uses the actuator ratings below:
+
+| Model | Rated | Stall | Collision hold | Sustained stop | Near-stall stop |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| STS3215 | 0.9 A | 2.7 A | 1.35 A | 1.8 A | 2.16 A |
+| STS3095 | 2.2 A | 9.8 A | 3.3 A | 4.4 A | 7.84 A |
+| STS3250 | 1.4 A | 4.2 A | 2.1 A | 2.8 A | 3.36 A |
+
+Collision hold requires the current threshold, at least 2° of command error, and
+less than 0.2° of progress toward the target over 150 ms. Position differences are
+converted to degrees using the motor calibration, including when commands use
+normalized coordinates. Reverse the target past the held position to release a hold.
+The Host supervises active targets every control cycle, including cycles without
+new commands, and writes a safety correction only when the held target changes.
+Sustained overload stops the robot after 650 ms; near-stall current stops it after
+80 ms. Durations use elapsed time; detection occurs on the next feedback sample.
+The gripper's separate 0.5 A threshold controls contact force.
+
+The Host grants control to the first command client and rejects other writers.
+After that client stops sending for the watchdog interval (1 second by default),
+the Host stops motion before releasing control. Stop the current controller and
+wait for release before starting another. State-only observers do not acquire
+control. Updated clients identify commands and bind them to the Host session and
+control epoch. Upgrade the Host and command clients together. Identified commands
+without the current epoch are rejected. PC commands require complete feedback
+from a request sent within the last 250 ms; a missing response stops new commands.
+Legacy unidentified commands remain supported as one shared legacy controller;
+do not run multiple legacy command clients together.
+Legacy commands cannot provide session/epoch replay protection.
+
+Synchronous evaluation refreshes expired feedback after inference, discarding
+responses prefetched before the calculation. The 250 ms feedback limit is not
+an inference deadline. Fresh feedback must still confirm the same safe control
+session; a watchdog event, joint protection, Host restart or ownership change
+pauses evaluation and discards queued actions until explicit recovery. No
+heartbeat commands are sent during inference to bypass the Host watchdog.
+
+### Camera and transport diagnostics
+
+Camera warnings follow the Host's enabled-camera list and appear once per missing-image
+episode. State-only responses do not trigger missing-image warnings. Older Hosts without
+camera metadata use the client configuration. Cached and placeholder images do not gain
+fresh capture timestamps. Observation metadata includes sampled motor currents in mA.
+
+Temporary ZMQ send-queue backpressure defers observation requests to a later cycle;
+it does not block control or register unsent requests. Other transport errors remain
+visible, and unavailable feedback still prevents new commands.
+
+### Terminal status
+
+The Host's `--profile_timing` output reports actual Host loop Hz and hardware,
+encoding, and transport timings. Hardware and protection faults remain on the Host.
+
+The teleoperation terminal prints `[TELEOP]` once per second: local loop Hz,
+successfully queued command Hz, feedback/control availability, and joint holds.
+`[TELEOP TRACKING]` shows the largest absolute target-to-feedback gap per arm and
+normalization range, keeping gripper and arm units separate. `target` and `command`
+are Host-reported requested and accepted targets; `measured` is sampled feedback.
+The gap is not a completed-motion error or a protection threshold: the feedback
+can precede the accepted command. Currents come from the same Host observation;
+older Hosts without current telemetry display `n/a`. Stale feedback is not shown
+as live tracking. These reports do not add motor reads or change dataset fields.
+
 ---
 
 ## 6. Dataset Recording
@@ -161,12 +224,40 @@ clients keep receiving the same state-plus-image multipart response.
 > Replace `<Pi_IP>` with your Raspberry Pi's IP address.
 > `record_bi.py` prints the local dataset path and uploads to Hugging Face Hub by default. Add `--dataset.push_to_hub=false` to keep the dataset local only.
 > Add `--dataset.root /path/to/dataset` when you want to store or resume from a specific local directory.
-> `record_bi.py` retains the original single-rate behavior: control and dataset
-> sampling both run at `--dataset.fps`. To opt into 50 Hz control with complete,
+> `record_bi.py` runs control at `--dataset.fps` and records only fresh state and
+> complete, aligned camera frames. Both recorders may extend the episode to reach
+> the requested frame count. To use 50 Hz control with complete,
 > fresh-camera samples at the dataset rate, run the same command with
-> `record_bi_multirate.py`. The multirate recorder may run slightly past the
-> countdown to reach the exact frame count and rejects stalled or misaligned
-> camera data instead of silently writing repeated frames.
+> `record_bi_multirate.py`. The multirate recorder waits for complete, aligned
+> camera frames and may run past the countdown to reach the requested frame count.
+> Temporary camera stalls or alignment errors do not end teleoperation. Press
+> the normal episode-stop key to save the frames collected so far.
+
+Both recorders keep recording during joint protection. Ctrl+C or a recording
+exception triggers saving of buffered frames and dataset finalization; `R` still
+explicitly discards the episode. Recovery requires writable storage and does not
+cover power loss or forced process termination.
+
+When Host feedback stops advancing, both recorders stop issuing new actions and
+wait without writing cached observations. Camera gaps skip recording but leave
+teleoperation running while joint feedback is fresh. Press the episode-stop key
+to retain a partial episode. After a severe overcurrent shutdown, inspect the
+robot and restart the Host manually before continuing.
+
+Protection and timing metadata are written asynchronously to
+`meta/safety/episode_XXXXXX.jsonl`. The dataset `action` remains the requested
+action. Each sidecar frame records its index, requested action, command identity,
+Host protection state and accepted arm targets. The feedback can acknowledge an
+earlier command: match `issued_command` against `safety.command`, not row position.
+Accepted targets are not measured joint positions. Host monotonic timestamps and
+PC monotonic timestamps use separate clocks. Camera gaps remain identifiable;
+split discontinuous segments before training policies on contiguous action chunks.
+Safety logging uses a bounded queue and a closing completeness record. Missing
+records and capture gaps require review. Dataset integrity checks report structural
+validity separately from training review; both repair stages retain safety logs.
+Failed episode saves retain `meta/recovery/episode_XXXXXX.json` and source images.
+After a partial commit, do not append or blindly retry: retain the dataset for
+recovery. Disk exhaustion can prevent even a recovery snapshot from being written.
 
 ### AlohaMini 1 — SO-ARM leader (5-DoF)
 
@@ -295,6 +386,14 @@ Make sure the Pi host is already running (§5), then run inference from the PC.
 > `alohamini1` (SO-ARM 5-DoF, 16-dim state) · `alohamini2` / `alohamini2pro` (AM-ARM 6-DoF, 18-dim state)
 
 ### `evaluate_bi.py` (custom script, N episodes)
+
+Update both the PC client and Pi Host before evaluation. Joint protection,
+command-watchdog events or stale Host feedback pause autonomous execution.
+Remove the obstruction and, if needed, release the joint hold with reverse
+teleoperation, then confirm recovery at the prompt. Recovery requires fresh Host
+feedback and clears previous inference/interpolation actions before restarting.
+Normal gripper contact does not pause evaluation. Buffered evaluation frames are
+saved on interruption.
 
 ACT uses synchronous inference. The interpolation multiplier below runs the robot control loop at
 `fps × multiplier` (20 × 3 = 60 Hz after the first action) and linearly interpolates between policy actions.
