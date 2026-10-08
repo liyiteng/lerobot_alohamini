@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 import sys
 import time
 from contextlib import suppress
@@ -299,6 +300,7 @@ class AlohaMini(Robot):
         self._arm_goal_positions: dict[str, float] = {}
         self._arm_sent_positions: dict[str, float] = {}
         self._arm_sent_at: float | None = None
+        self._joint_stall_last_warning: dict[str, float] = {}
         self._joint_hold_events = 0
         self._safety_session_id = uuid4().hex
         self._last_currents_log_t = 0.0
@@ -1058,7 +1060,7 @@ class AlohaMini(Robot):
     def _limit_joint_goal_by_current(
         self, bus: FeetechMotorsBus, goal_pos: dict[str, float]
     ) -> dict[str, float]:
-        """Hold joints that draw high current without moving toward their target."""
+        """Warn about stalled joints without changing targets; overload trips remain active."""
         target_keys = [
             key
             for key in goal_pos
@@ -1111,18 +1113,17 @@ class AlohaMini(Robot):
                 if now - candidate.started_at < _JOINT_COLLISION_DURATION_S:
                     continue
 
-                self._joint_hold_goal[motor] = present
-                self._joint_hold_events += 1
-                self._joint_hold_direction[motor] = -command_direction
-                self._joint_stall_candidates.pop(motor, None)
-                logger.warning(
-                    "Joint stall hold: %s, %.1f mA, error=%.2f deg, progress=%.2f deg, position=%.2f",
-                    motor,
-                    current_ma,
-                    command_error,
-                    progress,
-                    present,
-                )
+                if now - self._joint_stall_last_warning.get(motor, -math.inf) >= 5.0:
+                    logger.warning(
+                        "Joint stall suspected: %s, %.1f mA, error=%.2f deg, progress=%.2f deg; "
+                        "target unchanged, overload protection remains active",
+                        motor,
+                        current_ma,
+                        command_error,
+                        progress,
+                    )
+                    self._joint_stall_last_warning[motor] = now
+                continue
 
             hold_goal = self._joint_hold_goal[motor]
             release_direction = self._joint_hold_direction[motor]

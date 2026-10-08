@@ -318,7 +318,7 @@ def test_current_limiter_keeps_read_through_fallback() -> None:
     assert bus.reads == ["Present_Current", "Present_Position"]
 
 
-def test_joint_current_limiter_uses_elapsed_time(monkeypatch) -> None:
+def test_joint_current_warning_uses_elapsed_time(monkeypatch, caplog) -> None:
     bus = FakeBus()
     robot = make_robot_feedback_stub(bus)
     robot._feedback_currents_raw["arm_left_elbow_flex"] = 600.0
@@ -332,7 +332,9 @@ def test_joint_current_limiter_uses_elapsed_time(monkeypatch) -> None:
 
     assert first == goal
     assert second == goal
-    assert held == {"arm_left_elbow_flex.pos": 1.0}
+    assert held == goal
+    assert robot._joint_hold_goal == {}
+    assert "Joint stall suspected" in caplog.text
 
 
 def test_joint_current_limiter_does_not_hold_a_moving_joint(monkeypatch) -> None:
@@ -417,7 +419,7 @@ def test_slow_motion_uses_physical_degrees(monkeypatch, frequency_hz, norm_mode,
 
 
 @pytest.mark.parametrize("frequency_hz", [30, 50])
-def test_idle_host_cycles_hold_stalled_joint_once_and_allow_retreat(monkeypatch, frequency_hz) -> None:
+def test_idle_host_cycles_warn_without_holding_or_rewriting_targets(monkeypatch, frequency_hz, caplog):
     bus = FakeBus(current_raw=600.0)
     robot = make_robot_feedback_stub(bus)
     motor = "arm_left_elbow_flex"
@@ -428,25 +430,20 @@ def test_idle_host_cycles_hold_stalled_joint_once_and_allow_retreat(monkeypatch,
     assert AlohaMini.send_action.__wrapped__(robot, {key: 10.0})[key] == 10.0
     bus.writes.clear()
 
-    trip_time = None
-    for sample in range(1, frequency_hz // 2):
+    warning_time = None
+    for sample in range(1, frequency_hz * 6):
         now = sample / frequency_hz
         robot._feedback_positions = {motor: 1.0}
         robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
-        corrections = robot.supervise_arm_motion()
-        if corrections:
-            assert corrections == {key: 1.0}
-            assert trip_time is None
-            trip_time = now
-    assert 0.150 <= trip_time < 0.150 + 1 / frequency_hz
-    assert bus.writes == [("Goal_Position", {motor: 1.0})]
-
-    bus.current_raw = 0.0
-    robot._feedback_currents_raw = robot.read_and_check_currents(raw=True)
-    assert robot.supervise_arm_motion() == {}
-    assert robot._joint_hold_goal == {motor: 1.0}
-    assert AlohaMini.send_action.__wrapped__(robot, {key: 0.0})[key] == 0.0
+        assert robot.supervise_arm_motion() == {}
+        if caplog.records and warning_time is None:
+            warning_time = now
+    assert 0.150 <= warning_time < 0.150 + 1 / frequency_hz
+    assert len(caplog.records) == 2  # At most one warning per motor every five seconds.
+    assert bus.writes == []
     assert robot._joint_hold_goal == {}
+    assert robot._joint_hold_events == 0
+    assert robot._arm_goal_positions == {key: 10.0}
 
 
 def test_normal_observation_clears_pending_stall(monkeypatch) -> None:
@@ -483,7 +480,7 @@ def test_target_reversal_restarts_stall_window(monkeypatch) -> None:
     assert robot._limit_joint_goal_by_current(bus, retreat) == retreat
 
 
-def test_encoder_jitter_does_not_release_a_stalled_joint(monkeypatch) -> None:
+def test_encoder_jitter_still_warns_without_holding(monkeypatch, caplog) -> None:
     bus = FakeBus()
     robot = make_robot_feedback_stub(bus)
     motor = "arm_left_elbow_flex"
@@ -494,8 +491,9 @@ def test_encoder_jitter_does_not_release_a_stalled_joint(monkeypatch) -> None:
         monkeypatch.setattr(alohamini_module.time, "monotonic", lambda now=now: now)
         robot._feedback_positions[motor] = 1.0 + (0.08 if sample % 2 else 0.0)
         result = robot._limit_joint_goal_by_current(bus, goal)
-    assert motor in robot._joint_hold_goal
-    assert result[motor + ".pos"] == robot._joint_hold_goal[motor]
+    assert "Joint stall suspected" in caplog.text
+    assert robot._joint_hold_goal == {}
+    assert result == goal
 
 
 def test_partial_command_keeps_other_active_arm_targets(monkeypatch) -> None:
