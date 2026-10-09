@@ -324,23 +324,26 @@ def main():
                     validated_action[key] = numeric_value
                 if not validated_action:
                     raise ValueError("Received command contains no finite numeric action values.")
-                if command_owner.accept(
-                    command_metadata, robot.get_safety_status()["host_session_id"]
-                ):
+                if command_owner.accept(command_metadata, robot.get_safety_status()["host_session_id"]):
                     latest_action = validated_action
                     last_command_metadata = command_metadata
                     target_source = "command"
                     command_received = True
-                    has_received_command = True
-                    last_cmd_time = time.monotonic()
-                    watchdog_active = False
             except zmq.Again:
                 pass
             except Exception as e:
                 logging.exception("Message fetching failed: %s", e)
             command_done_t = time.perf_counter()
 
-            # Valid available commands renew the lease before checking inactivity.
+            action_sent = False
+            if command_received:
+                last_sent_action = robot.send_action(latest_action)
+                action_sent = True
+                has_received_command = True
+                last_cmd_time = time.monotonic()
+                watchdog_active = False
+
+            # Successfully written commands renew the lease before checking inactivity.
             # Invalid, duplicate, old-epoch and foreign commands cannot renew it.
             watchdog_tripped = (
                 has_received_command
@@ -363,11 +366,7 @@ def main():
                 has_received_command = False
                 command_owner.release()
 
-            action_sent = False
-            if command_received:
-                last_sent_action = robot.send_action(latest_action)
-                action_sent = True
-            elif not watchdog_tripped:
+            if not command_received and not watchdog_tripped:
                 safety_corrections = robot.supervise_arm_motion()
                 last_sent_action.update(safety_corrections)
                 if safety_corrections:

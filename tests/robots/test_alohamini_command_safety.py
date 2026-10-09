@@ -183,17 +183,26 @@ def test_host_accepts_available_command_before_expiry_but_invalid_commands_do_no
     host.zmq_cmd_socket.recv_string.side_effect = [
         json.dumps({"joint.pos": 5.0, "_command": identity}),
         json.dumps({"joint.pos": target, "_command": second}),
-        json.dumps({"joint.pos": 9.0, "_command": {
-            **identity, "sequence": 3, "control_epoch": 0 if incoming == "current" else 1,
-        }}),
+        json.dumps(
+            {
+                "joint.pos": 9.0,
+                "_command": {
+                    **identity,
+                    "sequence": 3,
+                    "control_epoch": 0 if incoming == "current" else 1,
+                },
+            }
+        ),
     ]
     host.zmq_observation_socket.recv_multipart.return_value = [b"client", b"1:state"]
     monkeypatch.setattr(alohamini_host, "AlohaMini", lambda config: robot)
     monkeypatch.setattr(alohamini_host, "AlohaMiniHost", lambda config: host)
     monkeypatch.setattr(alohamini_host, "build_robot_metadata", lambda robot: {})
     alohamini_host.main()
-    replies = [json.loads(call.args[0][2])["_safety"]
-               for call in host.zmq_observation_socket.send_multipart.call_args_list]
+    replies = [
+        json.loads(call.args[0][2])["_safety"]
+        for call in host.zmq_observation_socket.send_multipart.call_args_list
+    ]
     assert replies[1]["watchdog_active"] == (incoming != "current")
     assert replies[2]["watchdog_events"] == int(incoming != "current")
     assert not replies[2]["watchdog_active"]
@@ -304,8 +313,9 @@ def test_short_feedback_gap_does_not_block_new_leader_targets(monkeypatch):
     assert not client.observation_updated
     assert client.send_action({"joint.pos": 2.0})
     assert client.send_action({"joint.pos": 3.0})
-    assert [json.loads(call.args[0])["joint.pos"]
-            for call in client.zmq_cmd_socket.send_string.call_args_list] == [2.0, 3.0]
+    assert [
+        json.loads(call.args[0])["joint.pos"] for call in client.zmq_cmd_socket.send_string.call_args_list
+    ] == [2.0, 3.0]
 
 
 def test_cached_reads_cannot_renew_control_feedback_deadline(monkeypatch):
@@ -371,3 +381,57 @@ def test_unmatched_response_cannot_refresh_feedback():
     assert client.observation_sequence == 8
     assert not client.observation_updated
     client._parse_observation_message.assert_not_called()
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_host_watchdog_lease_begins_after_slow_successful_write(monkeypatch, write_fails):
+    import zmq
+
+    from lerobot.robots.alohamini import alohamini_host
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(alohamini_host.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(alohamini_host.time, "perf_counter", lambda: clock.now)
+    monkeypatch.setattr(
+        alohamini_host.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds)
+    )
+    monkeypatch.setattr("sys.argv", ["alohamini_host"])
+    robot = Mock(cameras={}, logs={}, _feedback_currents_raw={})
+    robot.action_features = {"joint.pos": float}
+    robot.get_observation.return_value = {"joint.pos": 1.0}
+    robot.get_safety_status.side_effect = lambda: status()
+    robot.supervise_arm_motion.return_value = {}
+
+    def write(action):
+        clock.now += 0.030
+        if write_fails:
+            raise OSError("servo write failed")
+        return dict(action)
+
+    robot.send_action.side_effect = write
+    host = Mock(max_loop_freq_hz=50, connection_time_s=0.080, watchdog_timeout_ms=25)
+    host.zmq_cmd_socket.recv_string.side_effect = [
+        json.dumps({"joint.pos": 5.0}),
+        zmq.Again(),
+        zmq.Again(),
+        zmq.Again(),
+    ]
+    host.zmq_observation_socket.recv_multipart.return_value = [b"client", b"1:state"]
+    monkeypatch.setattr(alohamini_host, "AlohaMini", lambda config: robot)
+    monkeypatch.setattr(alohamini_host, "AlohaMiniHost", lambda config: host)
+    monkeypatch.setattr(alohamini_host, "build_robot_metadata", lambda robot: {})
+
+    if write_fails:
+        with pytest.raises(OSError, match="servo write failed"):
+            alohamini_host.main()
+        host.zmq_observation_socket.send_multipart.assert_not_called()
+        robot.disconnect.assert_called_once()
+        host.disconnect.assert_called_once()
+    else:
+        alohamini_host.main()
+        replies = [
+            json.loads(call.args[0][2])["_safety"]
+            for call in host.zmq_observation_socket.send_multipart.call_args_list
+        ]
+        assert [reply["watchdog_active"] for reply in replies] == [False, False, False, True]
+        assert replies[-1]["watchdog_events"] == 1
