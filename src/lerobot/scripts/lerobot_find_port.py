@@ -36,9 +36,22 @@ def find_available_ports():
     if platform.system() == "Windows":
         # List COM ports using pyserial
         ports = [port.device for port in list_ports.comports()]
-    else:  # Linux/macOS
-        # List /dev/tty* ports for Unix-based systems
-        ports = [str(path) for path in Path("/dev").glob("tty*")]
+    elif platform.system() == "Darwin":
+        ports = sorted(
+            str(path)
+            for pattern in ("cu.usbmodem*", "cu.usbserial*")
+            for path in Path("/dev").glob(pattern)
+        )
+        if not ports:
+            ports = [port.device for port in list_ports.comports()]
+    else:  # Linux
+        ports = sorted(
+            str(path)
+            for pattern in ("ttyACM*", "ttyUSB*")
+            for path in Path("/dev").glob(pattern)
+        )
+        if not ports:
+            ports = [port.device for port in list_ports.comports()]
     return ports
 
 

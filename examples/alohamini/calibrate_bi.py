@@ -22,6 +22,7 @@ that both scripts read and write the same calibration files.
 """
 
 import argparse
+import os
 
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SOLeaderConfig
@@ -47,6 +48,29 @@ def parse_args() -> argparse.Namespace:
         choices=["so-arm-5dof", "am-leader-6dof"],
         help="Leader arm profile selector",
     )
+    parser.add_argument(
+        "--teleop.left_port",
+        "--leader.left_port",
+        "--left_port",
+        dest="left_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_LEFT_PORT", "/dev/cu.usbmodem5B910458311"),
+        help="Left leader arm serial port",
+    )
+    parser.add_argument(
+        "--teleop.right_port",
+        "--leader.right_port",
+        "--right_port",
+        dest="right_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_RIGHT_PORT", "/dev/cu.usbmodem5B790175581"),
+        help="Right leader arm serial port",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Always run interactive calibration even if a calibration file already exists",
+    )
     return parser.parse_args()
 
 
@@ -57,16 +81,20 @@ def main() -> None:
     leader = BiSOLeader(
         BiSOLeaderConfig(
             left_arm_config=SOLeaderConfig(
-                port="/dev/cu.usbmodem5B910458311",
+                port=args.left_port,
                 arm_profile=args.arm_profile,
             ),
             right_arm_config=SOLeaderConfig(
-                port="/dev/cu.usbmodem5B790175581",
+                port=args.right_port,
                 arm_profile=args.arm_profile,
             ),
             id=args.leader_id,
         )
     )
+
+    if args.force or os.environ.get("LEROBOT_FORCE_TTY_INPUT", "").strip().lower() in {"1", "true", "yes"}:
+        leader.left_arm.calibration = {}
+        leader.right_arm.calibration = {}
 
     leader.connect(calibrate=False)
     try:

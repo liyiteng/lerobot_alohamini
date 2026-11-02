@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 
 from lerobot.robots.alohamini import AlohaMiniClient, AlohaMiniClientConfig
@@ -67,6 +68,24 @@ parser.add_argument(
     choices=["so-arm-5dof", "am-leader-6dof"],
     help="Leader arm profile selector.",
 )
+parser.add_argument(
+    "--teleop.left_port",
+    "--leader.left_port",
+    "--left_port",
+    dest="left_port",
+    type=str,
+    default=os.environ.get("ALOHAMINI_LEFT_PORT", "/dev/cu.usbmodem5B910458311"),
+    help="Left leader arm serial port.",
+)
+parser.add_argument(
+    "--teleop.right_port",
+    "--leader.right_port",
+    "--right_port",
+    dest="right_port",
+    type=str,
+    default=os.environ.get("ALOHAMINI_RIGHT_PORT", "/dev/cu.usbmodem5B790175581"),
+    help="Right leader arm serial port.",
+)
 
 args = parser.parse_args()
 
@@ -95,12 +114,12 @@ robot_config = AlohaMiniClientConfig(
 )
 bi_cfg = BiSOLeaderConfig(
     left_arm_config=SOLeaderConfig(
-        port="/dev/cu.usbmodem5B910458311",
+        port=args.left_port,
         arm_profile=args.arm_profile,
         use_degrees=False,
     ),
     right_arm_config=SOLeaderConfig(
-        port="/dev/cu.usbmodem5B790175581",
+        port=args.right_port,
         arm_profile=args.arm_profile,
         use_degrees=False,
     ),
@@ -162,7 +181,7 @@ try:
         )
         arm_actions = leader.get_action() if not NO_LEADER else {}
         arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
-        keyboard_keys = keyboard.get_action()
+        keyboard_keys = keyboard.get_action() if keyboard.is_connected else {}
         base_action = robot._from_keyboard_to_base_action(keyboard_keys)
         lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
 
@@ -185,9 +204,10 @@ try:
 except KeyboardInterrupt:
     print("\n\n🛑 接收到用户中断信号，正在断开连接...")
 finally:
-    if not NO_ROBOT:
+    if not NO_ROBOT and robot.is_connected:
         robot.disconnect()
-    if not NO_LEADER:
+    if not NO_LEADER and leader.is_connected:
         leader.disconnect()
-    keyboard.disconnect()
+    if keyboard.is_connected:
+        keyboard.disconnect()
     print("👋 遥操作已安全退出！")

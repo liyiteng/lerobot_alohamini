@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import os
 import time
 
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
@@ -110,6 +111,10 @@ class SOLeader(Teleoperator):
 
     def calibrate(self) -> None:
         if self.calibration:
+            if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"}:
+                logger.info(f"Auto-applying saved calibration file associated with the id {self.id} to the motors")
+                self.bus.write_calibration(self.calibration)
+                return
             # Calibration file exists, ask user whether to use it or run new calibration
             user_input = input(
                 f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "

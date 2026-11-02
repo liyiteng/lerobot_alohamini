@@ -357,8 +357,9 @@ def create_key_listener(dispatch: Callable[[str], None], *, controls_help: str =
     Returns the listener (exposing ``.stop()``) or ``None``.
     """
     suffix = f" ({controls_help})" if controls_help else ""
+    force_tty = os.environ.get("LEROBOT_FORCE_TTY_INPUT", "").lower() in ("1", "true", "yes")
 
-    if pynput_can_capture() and keyboard is not None:
+    if not force_tty and pynput_can_capture() and keyboard is not None:
 
         def on_press(key):
             with contextlib.suppress(Exception):

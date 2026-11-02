@@ -76,7 +76,7 @@ def record_loop(
         frame_build_done_t = time.perf_counter()
 
         arm_action = {f"arm_{key}": value for key, value in leader_arm.get_action().items()}
-        keyboard_action = keyboard.get_action()
+        keyboard_action = keyboard.get_action() if getattr(keyboard, "is_connected", True) else {}
         action = {
             **arm_action,
             **robot._from_keyboard_to_base_action(keyboard_action),

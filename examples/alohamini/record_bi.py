@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import logging
 import math
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -117,7 +119,34 @@ def main():
         choices=["so-arm-5dof", "am-leader-6dof"],
         help="Leader arm profile selector.",
     )
-    parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
+    parser.add_argument(
+        "--teleop.left_port",
+        "--leader.left_port",
+        "--left_port",
+        dest="left_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_LEFT_PORT", "/dev/cu.usbmodem5B910458311"),
+        help="Left leader arm serial port.",
+    )
+    parser.add_argument(
+        "--teleop.right_port",
+        "--leader.right_port",
+        "--right_port",
+        dest="right_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_RIGHT_PORT", "/dev/cu.usbmodem5B790175581"),
+        help="Right leader arm serial port.",
+    )
+    parser.add_argument(
+        "--resume",
+        "--dataset.resume",
+        dest="resume",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Resume recording on existing dataset",
+    )
     parser.add_argument(
         "--profile-timing",
         "--profile_timing",
@@ -157,11 +186,11 @@ def main():
     )
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
-            port="/dev/cu.usbmodem5B910458311",
+            port=args.left_port,
             arm_profile=args.arm_profile,
         ),
         right_arm_config=SOLeaderConfig(
-            port="/dev/cu.usbmodem5B790175581",
+            port=args.right_port,
             arm_profile=args.arm_profile,
         ),
         id=args.leader_id,
@@ -174,13 +203,35 @@ def main():
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
+    # === Connect devices first so failed connections never leave empty dataset dirs ===
+    robot.connect()
+    leader_arm.connect()
+    keyboard.connect()
+
     # === Dataset setup ===
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR)
     dataset_features = {**action_features, **obs_features}
     dataset_root = Path(args.dataset_root) if args.dataset_root else HF_LEROBOT_HOME / args.dataset_repo_id
 
-    if args.resume:
+    has_existing_episodes = False
+    if dataset_root.exists():
+        info_file = dataset_root / "meta" / "info.json"
+        if info_file.exists():
+            try:
+                with open(info_file) as f:
+                    info_data = json.load(f)
+                has_existing_episodes = int(info_data.get("total_episodes", 0)) > 0
+            except Exception:
+                has_existing_episodes = False
+        if not has_existing_episodes:
+            shutil.rmtree(dataset_root, ignore_errors=True)
+
+    should_resume = args.resume and has_existing_episodes
+    if not should_resume and has_existing_episodes and os.environ.get("LEROBOT_FORCE_TTY_INPUT") == "1":
+        should_resume = True
+
+    if should_resume:
         dataset = LeRobotDataset.resume(
             repo_id=args.dataset_repo_id,
             root=dataset_root,
@@ -197,15 +248,10 @@ def main():
             image_writer_threads=4,
         )
 
-    # === Connect devices ===
-    robot.connect()
-    leader_arm.connect()
-    keyboard.connect()
-
     listener, events = init_keyboard_listener()
 
-    if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
-        raise ValueError("Robot or teleop is not connected!")
+    if not robot.is_connected or not leader_arm.is_connected:
+        raise ValueError("Robot or leader arm is not connected!")
     if args.display_data:
         init_visualization("rerun", session_name="alohamini_record")
     recorded_episodes = 0
@@ -430,9 +476,12 @@ def main():
         events["exit_early"] = False
 
     # === Clean up ===
-    robot.disconnect()
-    leader_arm.disconnect()
-    keyboard.disconnect()
+    if robot.is_connected:
+        robot.disconnect()
+    if leader_arm.is_connected:
+        leader_arm.disconnect()
+    if keyboard.is_connected:
+        keyboard.disconnect()
     if listener is not None:
         listener.stop()
     print("Saving dataset...", flush=True)
