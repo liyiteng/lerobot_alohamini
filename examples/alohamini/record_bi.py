@@ -157,11 +157,11 @@ def main():
     )
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_left",
+            port="/dev/cu.usbmodem5B910458311",
             arm_profile=args.arm_profile,
         ),
         right_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_right",
+            port="/dev/cu.usbmodem5B790175581",
             arm_profile=args.arm_profile,
         ),
         id=args.leader_id,
@@ -311,9 +311,11 @@ def main():
             robot.get_observation()
             if robot.observation_sequence == previous_sequence and time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Episode {episode_number} did not receive a fresh observation before recording. "
+                    f"Episode {episode_number} did not receive a fresh observation before recording "
+                    f"(sequence stuck at {previous_sequence} for {robot.config.connect_timeout_s}s). "
                     "Recording was stopped to avoid saving cached reset frames."
                 )
+            time.sleep(0.01)
 
     def record_episode(episode_number: int) -> None:
         """Record one episode while displaying its remaining time."""

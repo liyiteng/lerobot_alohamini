@@ -53,6 +53,12 @@ parser.add_argument(
     help="Leader arm device ID",
 )
 parser.add_argument(
+    "--display-data",
+    "--display_data",
+    action="store_true",
+    help="Display observations and actions in Rerun viewer (default: False)",
+)
+parser.add_argument(
     "--teleop.arm_profile",
     "--arm_profile",
     dest="arm_profile",
@@ -66,6 +72,7 @@ args = parser.parse_args()
 
 NO_ROBOT = args.no_robot
 NO_LEADER = args.no_leader
+DISPLAY_DATA = args.display_data
 FPS = args.fps
 CAMERA_FPS = args.camera_fps
 if FPS <= 0 or CAMERA_FPS <= 0:
@@ -75,10 +82,11 @@ if CAMERA_FPS > FPS:
 # ========================================== #
 
 if NO_ROBOT:
-    print("🧪 NO_ROBOT mode enabled: robot will not connect, only print actions.")
+    print("🧪 NO_ROBOT 模式已启用：不连接从臂机器人，仅打印动作。")
 
 if NO_LEADER:
-    print("🧪 NO_LEADER mode enabled: leader arm will not connect, only print actions.")
+    print("🧪 NO_LEADER 模式已启用：不连接示教主臂，仅支持键盘控制。")
+
 # Create configs
 robot_config = AlohaMiniClientConfig(
     remote_ip=args.remote_ip,
@@ -87,12 +95,14 @@ robot_config = AlohaMiniClientConfig(
 )
 bi_cfg = BiSOLeaderConfig(
     left_arm_config=SOLeaderConfig(
-        port="/dev/am_arm_leader_left",
+        port="/dev/cu.usbmodem5B910458311",
         arm_profile=args.arm_profile,
+        use_degrees=False,
     ),
     right_arm_config=SOLeaderConfig(
-        port="/dev/am_arm_leader_right",
+        port="/dev/cu.usbmodem5B790175581",
         arm_profile=args.arm_profile,
+        use_degrees=False,
     ),
     id=args.leader_id,
 )
@@ -103,47 +113,81 @@ robot = AlohaMiniClient(robot_config)
 
 # Connection logic
 if not NO_ROBOT:
+    print(f"📡 正在连接机器人 Host ({args.remote_ip})...")
     robot.connect()
+    print("✅ 机器人从臂已连接！")
 else:
-    print("🧪 robot.connect() skipped, only printing actions.")
+    print("🧪 robot.connect() 已跳过。")
 
 if not NO_LEADER:
+    print("🎮 正在连接左右示教主臂...")
     leader.connect()
+    print("✅ 左右示教主臂已连接！")
 else:
-    print("🧪 robot.connect() skipped, only printing actions.")
+    print("🧪 leader.connect() 已跳过。")
 
+print("⌨️  正在初始化键盘控制...")
 keyboard.connect()
+print("✅ 键盘已就绪！")
 
-
-
-init_rerun(session_name="alohamini_teleop")
+if DISPLAY_DATA:
+    print("🖥️  正在启动 Rerun 可视化窗口...")
+    init_rerun(session_name="alohamini_teleop")
 
 if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
-    print("⚠️ Warning: Some devices are not connected! Still running for debug.")
+    print("⚠️ 警告: 部分设备未连接，但仍尝试继续运行。")
+
+print("\n🚀【遥操作已正式就绪】")
+print("👉 现在缓慢移动左/右主臂，机器人从臂将实时同步跟随！")
+print("👉 键盘控制底盘: W/S 前后，A/D 旋转，Z/X 平移；升降: U/J 升降。")
+print("👉 按 Ctrl + C 可安全停止退出。\n")
 
 # Main loop: 50 Hz command/state control with an independent 30 Hz camera cadence.
 next_camera_request_t = time.perf_counter()
 camera_interval_s = 1.0 / CAMERA_FPS
-while True:
-    t0 = time.perf_counter()
+loop_start_t = time.perf_counter()
+last_status_print_t = time.perf_counter()
+frame_count = 0
 
-    request_cameras = t0 >= next_camera_request_t
-    if request_cameras:
-        while next_camera_request_t <= t0:
-            next_camera_request_t += camera_interval_s
-    observation = (
-        robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
-    )
-    arm_actions = leader.get_action() if not NO_LEADER else {}
-    arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
-    keyboard_keys = keyboard.get_action()
-    base_action = robot._from_keyboard_to_base_action(keyboard_keys)
-    lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
+try:
+    while True:
+        t0 = time.perf_counter()
 
-    action = {**arm_actions, **base_action, **lift_action}
-    log_rerun_data(observation, action)
+        request_cameras = t0 >= next_camera_request_t
+        if request_cameras:
+            while next_camera_request_t <= t0:
+                next_camera_request_t += camera_interval_s
+        observation = (
+            robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
+        )
+        arm_actions = leader.get_action() if not NO_LEADER else {}
+        arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
+        keyboard_keys = keyboard.get_action()
+        base_action = robot._from_keyboard_to_base_action(keyboard_keys)
+        lift_action = robot._from_keyboard_to_lift_action(keyboard_keys)
 
+        action = {**arm_actions, **base_action, **lift_action}
+        if DISPLAY_DATA:
+            log_rerun_data(observation, action)
+
+        if not NO_ROBOT:
+            robot.send_action(action)
+
+        frame_count += 1
+        now = time.perf_counter()
+        if now - last_status_print_t >= 1.0:
+            elapsed = now - loop_start_t
+            rate = frame_count / elapsed
+            print(f"\r[遥操作运行中] 控制频率: {rate:.1f} FPS | 累计控制帧: {frame_count}", end="", flush=True)
+            last_status_print_t = now
+
+        precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+except KeyboardInterrupt:
+    print("\n\n🛑 接收到用户中断信号，正在断开连接...")
+finally:
     if not NO_ROBOT:
-        robot.send_action(action)
-
-    precise_sleep(max(1.0 / FPS - (time.perf_counter() - t0), 0.0))
+        robot.disconnect()
+    if not NO_LEADER:
+        leader.disconnect()
+    keyboard.disconnect()
+    print("👋 遥操作已安全退出！")

@@ -123,7 +123,7 @@ def _motor_angle_from_position(position):
 # -------------------------------------------------------------- #
 
 
-def get_motors_states(port):
+def get_motors_states(port, history=False, compare_read=False):
     """
     Display a live table of motor states. Always scan [scan_start, scan_end] and show online motors only.
     - Even if motors are provided, rebuild from scanned IDs to avoid reading offline IDs.
@@ -195,8 +195,12 @@ def get_motors_states(port):
         print(f"Online IDs: [{ids_str}] on {port}")
 
         printed_lines = 0
-        interval_s = 0.1
-        _hide_cursor()
+        interval_s = 1.0 if history else 0.1
+        previous_positions = {}
+        min_positions = {}
+        max_positions = {}
+        if not history:
+            _hide_cursor()
 
         while True:
             try:
@@ -210,6 +214,37 @@ def get_motors_states(port):
             except Exception as e:
                 print(f"Sync read error: {e}")
                 break
+
+            if history:
+                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {port}")
+                if compare_read:
+                    print(" ID |  SYNC | SINGLE | TORQUE | CHANGE |   MIN |   MAX")
+                else:
+                    print(" ID |   POS | CHANGE |   MIN |   MAX")
+                for name, motor in motors.items():
+                    value = pos.get(name)
+                    if value is None:
+                        print(f"{motor.id:3} | unavailable")
+                        continue
+                    if compare_read:
+                        try:
+                            single = bus.read("Present_Position", name, normalize=False)
+                            torque = bus.read("Torque_Enable", name, normalize=False)
+                        except Exception as e:
+                            print(f"{motor.id:3} | Single read failed: {e}", flush=True)
+                            return
+                    previous = previous_positions.get(name)
+                    change = "--" if previous is None else f"{value - previous:+d}"
+                    min_positions[name] = min(min_positions.get(name, value), value)
+                    max_positions[name] = max(max_positions.get(name, value), value)
+                    prefix = f"{motor.id:3} | {value:5d} | "
+                    if compare_read:
+                        prefix += f"{single:6d} | {torque:6d} | "
+                    print(prefix + f"{change:>6} | {min_positions[name]:5d} | {max_positions[name]:5d}")
+                    previous_positions[name] = value
+                sys.stdout.flush()
+                time.sleep(interval_s)
+                continue
 
             rows = []
             for name in motors.keys():
@@ -269,7 +304,8 @@ def get_motors_states(port):
         try:
             bus.disconnect(disable_torque=False)
         finally:
-            _show_cursor()
+            if not history:
+                _show_cursor()
 
 
 def configure_motor_id(port: str, current_id: int, new_id: int):
@@ -722,15 +758,29 @@ if __name__ == "__main__":
     parser.add_argument("--set_phase", type=int, help="Desired Phase value to set on the motor")
     parser.add_argument("--position", type=str, help="Goal position (raw ticks) for move_motor_to_position")
     parser.add_argument("--script_path", type=str, help="Relative path to CSV-like action script")
+    parser.add_argument(
+        "--history", action="store_true",
+        help="Append timestamped position history every second (get_motors_states only)",
+    )
+    parser.add_argument(
+        "--compare-read", action="store_true",
+        help="With --history, compare batch and individual raw position reads and read torque state",
+    )
     # parser.add_argument("--file", type=str, help="Path to calibration JSON file")
 
     args = parser.parse_args()
     cmd = args.command
+    if args.history and cmd != "get_motors_states":
+        parser.error("--history is only supported for get_motors_states")
+    if args.compare_read and not args.history:
+        parser.error("--compare-read requires --history")
 
     # ---- helpers for dispatch ----
 
     commands = {
-        "get_motors_states": lambda: get_motors_states(args.port),
+        "get_motors_states": lambda: get_motors_states(
+            args.port, history=args.history, compare_read=args.compare_read
+        ),
         "configure_motor_id": lambda: (
             configure_motor_id(args.port, int(args.id), int(args.set_id))
             if (args.id is not None and args.set_id is not None)

@@ -57,11 +57,11 @@ def main() -> None:
     leader = BiSOLeader(
         BiSOLeaderConfig(
             left_arm_config=SOLeaderConfig(
-                port="/dev/am_arm_leader_left",
+                port="/dev/cu.usbmodem5B910458311",
                 arm_profile=args.arm_profile,
             ),
             right_arm_config=SOLeaderConfig(
-                port="/dev/am_arm_leader_right",
+                port="/dev/cu.usbmodem5B790175581",
                 arm_profile=args.arm_profile,
             ),
             id=args.leader_id,

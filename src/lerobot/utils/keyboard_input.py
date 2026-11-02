@@ -280,7 +280,7 @@ class TerminalKeyListener:
         # version-specific behavior of tty.setcbreak.)
         new_attrs = termios.tcgetattr(self._fd)
         new_attrs[3] &= ~termios.ECHO  # index 3 == lflags
-        termios.tcsetattr(self._fd, termios.TCSADRAIN, new_attrs)
+        termios.tcsetattr(self._fd, termios.TCSANOW, new_attrs)
         # Safety net: restore the terminal even if stop() is never reached (crash).
         atexit.register(self.stop)
 
