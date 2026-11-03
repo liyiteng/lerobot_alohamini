@@ -95,6 +95,8 @@ def main() -> None:
     if args.force or os.environ.get("LEROBOT_FORCE_TTY_INPUT", "").strip().lower() in {"1", "true", "yes"}:
         leader.left_arm.calibration = {}
         leader.right_arm.calibration = {}
+        leader.left_arm._force_interactive = True
+        leader.right_arm._force_interactive = True
 
     leader.connect(calibrate=False)
     try:

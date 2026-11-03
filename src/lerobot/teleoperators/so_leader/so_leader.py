@@ -111,18 +111,36 @@ class SOLeader(Teleoperator):
 
     def calibrate(self) -> None:
         if self.calibration:
-            if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"}:
+            if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"} and not getattr(self, "_force_interactive", False):
                 logger.info(f"Auto-applying saved calibration file associated with the id {self.id} to the motors")
                 self.bus.write_calibration(self.calibration)
                 return
-            # Calibration file exists, ask user whether to use it or run new calibration
-            user_input = input(
-                f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
+            if not getattr(self, "_force_interactive", False):
+                # Calibration file exists, ask user whether to use it or run new calibration
+                user_input = input(
+                    f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
+                )
+                if user_input.strip().lower() != "c":
+                    logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
+                    self.bus.write_calibration(self.calibration)
+                    return
+
+        # If not interactive calibration, prevent hanging on input()
+        if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"} and not getattr(self, "_force_interactive", False):
+            # Check if partner arm calibration exists to borrow
+            other_id = self.id.replace("_left", "_right") if "_left" in self.id else self.id.replace("_right", "_left")
+            other_file = self.calibration_dir / f"{other_id}.json"
+            if other_file.is_file():
+                import shutil
+                shutil.copyfile(other_file, self.calibration_file)
+                logger.warning(f"主控臂 [{self.id}] 标定文件不存在，已自动复用对侧标定参数: {other_file}")
+                self.calibration = self.load_calibration()
+                if self.calibration:
+                    self.bus.write_calibration(self.calibration)
+                    return
+            raise RuntimeError(
+                f"主控臂 [{self.id}] 尚未完成校准！请先运行「步骤 2：机械臂校准」，缺少标定文件: {self.calibration_file}"
             )
-            if user_input.strip().lower() != "c":
-                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
-                self.bus.write_calibration(self.calibration)
-                return
 
         logger.info(f"\nRunning calibration of {self}")
         self.bus.disable_torque()
