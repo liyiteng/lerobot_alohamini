@@ -28,7 +28,7 @@ import zmq
 from .alohamini import AlohaMini
 from .camera_stream import CameraStreamPublisher
 from .command_owner import CommandOwner
-from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
+from .config_alohamini import AlohaMini2EduConfig, AlohaMiniConfig, AlohaMiniHostConfig
 
 
 class AlohaMiniHost:
@@ -163,7 +163,7 @@ def main():
         "--robot_model",
         type=str,
         default="alohamini1",
-        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        choices=["alohamini1", "alohamini2", "alohamini2pro", "alohamini2edu"],
         help=(
             "Robot model — drives follower arm profile, base motors, lift motor, lead screw pitch, "
             "and chassis kinematics.\n"
@@ -205,7 +205,10 @@ def main():
     args = parser.parse_args()
 
     logging.info("Configuring AlohaMini")
-    robot_config = AlohaMiniConfig()
+    if args.robot_model == "alohamini2edu":
+        robot_config = AlohaMini2EduConfig()
+    else:
+        robot_config = AlohaMiniConfig()
     robot_config.id = "AlohaMiniRobot"
     robot_config.robot_model = args.robot_model
     robot_config.no_follower = args.no_follower

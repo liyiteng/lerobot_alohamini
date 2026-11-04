@@ -13,7 +13,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--robot_model",
         type=str,
         default="alohamini1",
-        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        choices=["alohamini1", "alohamini2", "alohamini2pro", "alohamini2edu"],
         help=(
             "Robot model. Must match the physical AlohaMini hardware: "
             "alohamini1, alohamini2, or alohamini2pro."

@@ -78,6 +78,15 @@ ROBOT_SPECS: dict[str, dict] = {
         "wheel_radius": 0.063,
         "base_radius": 0.195,
     },
+    # Binocular forward rig: same hardware as alohamini2pro, only camera config differs.
+    "alohamini2edu": {
+        "arm_profile": "am-follower-6dof-hd",
+        "base_motor": "sts3250",
+        "lift_motor": "sts3095",
+        "lead_mm_per_rev": 131.0,
+        "wheel_radius": 0.063,
+        "base_radius": 0.195,
+    },
 }
 
 

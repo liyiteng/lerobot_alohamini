@@ -19,12 +19,20 @@ from lerobot.robots.alohamini.camera_stream import (
 )
 from lerobot.robots.alohamini.config_alohamini import (
     AlohaMiniHostConfig,
+    alohamini2edu_cameras_config,
     alohamini_cameras_config,
 )
 
 
 def test_50hz_branch_keeps_original_camera_defaults_and_ros_stream_opt_in() -> None:
+    # Default: legacy single forward + wrist_right (unchanged for existing users)
     assert set(alohamini_cameras_config()) == {"forward", "wrist_right"}
+    # Separate binocular robot type: forward_left + forward_right + wrist_right
+    assert set(alohamini2edu_cameras_config()) == {
+        "forward_left",
+        "forward_right",
+        "wrist_right",
+    }
     config = AlohaMiniHostConfig()
     assert config.max_loop_freq_hz == 50
     assert config.camera_stream_enabled is False
