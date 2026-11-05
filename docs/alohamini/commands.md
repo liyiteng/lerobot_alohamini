@@ -245,6 +245,14 @@ python examples/alohamini/teleoperate_bi.py \
   --camera-fps 10
 ```
 
+Slow-link recovery is automatic; existing commands need no additional options.
+The client retains a delayed response across 200 ms poll timeouts until its
+1 second feedback lifetime expires. If the link is slow, the normal three-request
+window automatically shrinks to one for the rest of that connection. Receiving a
+late packet does not reset its age: the freshness check uses the original request
+time. Genuine feedback loss still prevents new commands, and control can recover
+once fresh feedback with the current Host control epoch arrives.
+
 ## Recording
 
 `record_bi.py` prints the local dataset path after setup and finalization, and uploads to Hugging Face Hub by default.
