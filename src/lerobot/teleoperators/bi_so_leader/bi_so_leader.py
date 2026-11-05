@@ -91,6 +91,119 @@ class BiSOLeader(BimanualMixin, Teleoperator):
 
         return action_dict
 
+    def calibrate_one_step(self) -> None:
+        """Execute 1-step calibration on both left and right arms."""
+        self.left_arm.calibrate_one_step()
+        self.right_arm.calibrate_one_step()
+
+    @check_if_not_connected
+    def auto_home(
+        self,
+        duration_s: float = 1.8,
+        torque_limit: int = 220,
+        hold_s: float = 0.8,
+        release_after: bool = True,
+    ) -> None:
+        """Gently move both left and right leader arms in parallel to their 90-degree midpoint (2048)."""
+        import threading
+
+        t_left = threading.Thread(
+            target=self.left_arm.auto_home,
+            kwargs={
+                "duration_s": duration_s,
+                "torque_limit": torque_limit,
+                "hold_s": hold_s,
+                "release_after": release_after,
+            },
+            daemon=True,
+        )
+        t_right = threading.Thread(
+            target=self.right_arm.auto_home,
+            kwargs={
+                "duration_s": duration_s,
+                "torque_limit": torque_limit,
+                "hold_s": hold_s,
+                "release_after": release_after,
+            },
+            daemon=True,
+        )
+        t_left.start()
+        t_right.start()
+        t_left.join()
+        t_right.join()
+
+    @check_if_not_connected
+    def sync_to_pose(
+        self,
+        target_pose: dict[str, float],
+        duration_s: float = 1.5,
+        torque_limit: int = 220,
+        release_after: bool = True,
+    ) -> None:
+        """Smoothly align both leader arms over USB to match normalized joint values (e.g. Follower observation)."""
+        import threading
+
+        def _norm_to_raw(arm: SOLeader, prefix: str) -> dict[str, int]:
+            ids_vals: dict[int, float] = {}
+            for motor, m in arm.bus.motors.items():
+                for candidate_key in (
+                    f"arm_{prefix}_{motor}.pos",
+                    f"{prefix}_{motor}.pos",
+                    f"{motor}.pos",
+                ):
+                    if candidate_key in target_pose:
+                        ids_vals[m.id] = float(target_pose[candidate_key])
+                        break
+            if not ids_vals or not arm.bus.calibration:
+                return {m: 2048 for m in arm.bus.motors}
+            try:
+                raw_by_id = arm.bus._unnormalize(ids_vals)
+                return {arm.bus._id_to_name(i): int(v) for i, v in raw_by_id.items()}
+            except Exception:
+                return {m: 2048 for m in arm.bus.motors}
+
+        left_raw = _norm_to_raw(self.left_arm, "left")
+        right_raw = _norm_to_raw(self.right_arm, "right")
+
+        t_left = threading.Thread(
+            target=self.left_arm.smooth_move_to_raw,
+            kwargs={
+                "target_raw": left_raw,
+                "duration_s": duration_s,
+                "torque_limit": torque_limit,
+                "release_after": release_after,
+                "hold_s": 0.25,
+            },
+            daemon=True,
+        )
+        t_right = threading.Thread(
+            target=self.right_arm.smooth_move_to_raw,
+            kwargs={
+                "target_raw": right_raw,
+                "duration_s": duration_s,
+                "torque_limit": torque_limit,
+                "release_after": release_after,
+                "hold_s": 0.25,
+            },
+            daemon=True,
+        )
+        t_left.start()
+        t_right.start()
+        t_left.join()
+        t_right.join()
+
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        # TODO: Implement force feedback
-        raise NotImplementedError
+        left_fb = {
+            k.removeprefix("left_"): v
+            for k, v in feedback.items()
+            if k.startswith("left_")
+        }
+        right_fb = {
+            k.removeprefix("right_"): v
+            for k, v in feedback.items()
+            if k.startswith("right_")
+        }
+        if left_fb:
+            self.left_arm.send_feedback(left_fb)
+        if right_fb:
+            self.right_arm.send_feedback(right_fb)

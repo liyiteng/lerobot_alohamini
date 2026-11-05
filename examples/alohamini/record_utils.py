@@ -13,6 +13,50 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import log_visualization_data
 
 
+class GripperGestureDetector:
+    """Detects rapid double-pinch gestures on leader arm grippers for hands-free recording."""
+
+    def __init__(self, window_s: float = 0.85):
+        self.window_s = window_s
+        self.r_state = "IDLE"
+        self.r_pinches: list[float] = []
+        self.l_state = "IDLE"
+        self.l_pinches: list[float] = []
+
+    def update(self, r_val: float | None, l_val: float | None) -> tuple[bool, bool]:
+        now = time.perf_counter()
+        r_triggered = False
+        l_triggered = False
+
+        def _process_arm(val: float | None, state: str, pinches: list[float]) -> tuple[bool, str]:
+            if val is None:
+                return False, state
+            # Retain only pinches within window
+            valid_pinches = [t for t in pinches if now - t <= self.window_s]
+            pinches.clear()
+            pinches.extend(valid_pinches)
+
+            # Recognize pinch whether 0 is closed or 100 is closed
+            is_pinched = (val <= 30.0) or (val >= 90.0)
+            is_released = (35.0 < val < 85.0)
+
+            triggered = False
+            if state == "IDLE" and is_pinched:
+                state = "PINCHED"
+                pinches.append(now)
+                if len(pinches) >= 2:
+                    triggered = True
+                    pinches.clear()
+            elif state == "PINCHED" and is_released:
+                state = "IDLE"
+
+            return triggered, state
+
+        r_trig, self.r_state = _process_arm(r_val, self.r_state, self.r_pinches)
+        l_trig, self.l_state = _process_arm(l_val, self.l_state, self.l_pinches)
+        return r_trig, l_trig
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Any,
@@ -32,6 +76,7 @@ def record_loop(
     single_task: str | None = None,
     timing_callback: Callable[[dict[str, float]], None] | None = None,
     display_data: bool = False,
+    enable_hands_free: bool = True,
 ) -> None:
     """AlohaMini-specific bimanual recording loop with optional timing diagnostics."""
     if dataset is not None and dataset.fps != fps:
@@ -55,6 +100,7 @@ def record_loop(
         "sleep": 0.0,
         "loop": 0.0,
     }
+    gesture_detector = GripperGestureDetector() if enable_hands_free else None
 
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
@@ -76,6 +122,30 @@ def record_loop(
         frame_build_done_t = time.perf_counter()
 
         arm_action = {f"arm_{key}": value for key, value in leader_arm.get_action().items()}
+
+        if enable_hands_free and gesture_detector is not None:
+            r_grip = arm_action.get("arm_right_gripper.pos")
+            l_grip = arm_action.get("arm_left_gripper.pos")
+            r_trig, l_trig = gesture_detector.update(r_grip, l_grip)
+            if r_trig:
+                print("\r\n\x1b[1;36m✔ [免脱手手势: 右夹爪双击] 完成当前集录制，进入保存与复位...\x1b[0m", flush=True)
+                if dataset is not None and getattr(dataset, "writer", None) is not None:
+                    buf = dataset.writer.episode_buffer
+                    if isinstance(buf, dict) and buf.get("size", 0) > 15:
+                        drop_count = min(int(0.65 * fps), buf["size"] - 5)
+                        if drop_count > 0:
+                            for k in buf:
+                                if isinstance(buf[k], list) and len(buf[k]) >= drop_count:
+                                    buf[k] = buf[k][:-drop_count]
+                            buf["size"] = max(0, buf["size"] - drop_count)
+                events["exit_early"] = True
+                break
+            elif l_trig:
+                print("\r\n\x1b[1;33m⚠ [免脱手手势: 左夹爪双击] 本集已作废，清空并重新开始...\x1b[0m", flush=True)
+                events["rerecord_episode"] = True
+                events["exit_early"] = True
+                break
+
         keyboard_action = keyboard.get_action() if getattr(keyboard, "is_connected", True) else {}
         action = {
             **arm_action,

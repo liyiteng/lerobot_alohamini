@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Always run interactive calibration even if a calibration file already exists",
     )
+    parser.add_argument(
+        "--one_step",
+        "--one-step",
+        dest="one_step",
+        action="store_true",
+        help="Instant 1-step calibration: locks 90° center and applies golden mechanical ROM limits",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +98,12 @@ def main() -> None:
             id=args.leader_id,
         )
     )
+
+    if args.one_step:
+        leader.left_arm._one_step_mode = True
+        leader.right_arm._one_step_mode = True
+        leader.left_arm.calibration = {}
+        leader.right_arm.calibration = {}
 
     if args.force or os.environ.get("LEROBOT_FORCE_TTY_INPUT", "").strip().lower() in {"1", "true", "yes"}:
         leader.left_arm.calibration = {}

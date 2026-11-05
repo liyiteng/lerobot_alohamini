@@ -175,6 +175,36 @@ def main():
         default=True,
         help="Whether to upload the dataset to Hugging Face Hub after recording.",
     )
+    parser.add_argument(
+        "--hands-free",
+        "--hands_free",
+        dest="hands_free",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Enable double-pinch gripper gestures for hands-free recording (right=next, left=rerecord).",
+    )
+    parser.add_argument(
+        "--auto-reset",
+        "--auto_reset",
+        dest="auto_reset",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Auto-home leader arm during reset phase so user can freely arrange physical scene.",
+    )
+    parser.add_argument(
+        "--anti-jerk",
+        "--anti_jerk",
+        dest="anti_jerk",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Align leader arm to follower pose before starting to prevent teleoperation jumps.",
+    )
 
     args = parser.parse_args()
 
@@ -207,6 +237,18 @@ def main():
     robot.connect()
     leader_arm.connect()
     keyboard.connect()
+
+    # Align leader arm to robot's current pose to prevent starting jerk
+    if args.anti_jerk and robot.is_connected and leader_arm.is_connected:
+        try:
+            print("🚀 [防暴冲柔顺对齐] 正在让主控臂轻柔对齐机器人当前姿态...", flush=True)
+            initial_obs = robot.get_observation()
+            state_obs = initial_obs.get("state", {})
+            if isinstance(state_obs, dict) and state_obs:
+                leader_arm.sync_to_pose(state_obs, duration_s=1.2, torque_limit=220, release_after=True)
+                print("✔ 主从姿态已平稳对齐，遥操作平顺起步。", flush=True)
+        except Exception as e:
+            logging.debug(f"Anti-jerk sync skipped: {e}")
 
     # === Dataset setup ===
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
@@ -330,6 +372,11 @@ def main():
 
         countdown_thread = threading.Thread(target=show_countdown, daemon=True)
         countdown_thread.start()
+        if args.auto_reset and leader_arm.is_connected:
+            try:
+                leader_arm.auto_home(duration_s=1.5, torque_limit=200, hold_s=0.5, release_after=True)
+            except Exception:
+                pass
         try:
             record_loop(
                 robot=robot,
@@ -414,6 +461,7 @@ def main():
                 robot_observation_processor=robot_observation_processor,
                 timing_callback=print_record_timing if args.profile_timing else None,
                 display_data=args.display_data,
+                enable_hands_free=args.hands_free,
             )
         finally:
             recording_elapsed_s = time.monotonic() - recording_started_at
@@ -427,6 +475,12 @@ def main():
                 f"({recorded_frames} frames in {recording_elapsed_s:.2f}s; target {args.fps} FPS)",
                 flush=True,
             )
+            if recorded_frames < 2.5 * args.fps and not events["rerecord_episode"]:
+                sec = recorded_frames / args.fps
+                print(
+                    f"\r\n\x1b[1;33m[Smart QA 提醒] ⚠ 本集有效时长偏短（仅 {sec:.1f} 秒），如属误触可随时重录。\x1b[0m\r\n",
+                    flush=True,
+                )
 
     while recorded_episodes < args.num_episodes and not events["stop_recording"]:
         episode_number = dataset.num_episodes + 1

@@ -17,6 +17,7 @@
 import logging
 import os
 import time
+from pathlib import Path
 
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import (
@@ -49,6 +50,18 @@ _ARM_PROFILES: dict[str, tuple[tuple[str, int, str, MotorNormMode | None], ...]]
         ("wrist_roll", 6, "sts3215", None),
         ("gripper", 7, "sts3215", MotorNormMode.RANGE_0_100),
     ),
+}
+
+# Standard mechanical ROM limits around the 2047 half-turn center for STS3215 leader arms.
+# Used for 1-step instant calibration and automatic healing of incomplete manual sweeps.
+_GOLDEN_ROM_LIMITS: dict[str, tuple[int, int]] = {
+    "shoulder_pan": (1024, 3072),
+    "shoulder_lift": (907, 3164),
+    "elbow_flex": (924, 3032),
+    "wrist_flex": (1020, 3079),
+    "wrist_yaw": (1037, 2917),
+    "wrist_roll": (0, 4095),
+    "gripper": (1431, 2678),
 }
 
 
@@ -109,8 +122,105 @@ class SOLeader(Teleoperator):
     def is_calibrated(self) -> bool:
         return self.bus.is_calibrated
 
+    def _save_calibration(self, fpath: Path | None = None) -> None:
+        super()._save_calibration(fpath)
+        try:
+            curr_path = self.calibration_fpath if fpath is None else fpath
+            name = curr_path.name
+            alt_name = None
+            if "so101_leader_bi" in name:
+                alt_name = name.replace("so101_leader_bi", "am_leader_bi")
+            elif "am_leader_bi" in name:
+                alt_name = name.replace("am_leader_bi", "so101_leader_bi")
+            if alt_name:
+                alt_path = curr_path.parent / alt_name
+                import shutil
+                shutil.copyfile(curr_path, alt_path)
+        except Exception:
+            pass
+
+    def load_calibration(self, fpath: Path | None = None) -> dict[str, MotorCalibration]:
+        try:
+            curr_path = self.calibration_fpath if fpath is None else fpath
+            if not curr_path.is_file():
+                alt_name = None
+                if "so101_leader_bi" in curr_path.name:
+                    alt_name = curr_path.name.replace("so101_leader_bi", "am_leader_bi")
+                elif "am_leader_bi" in curr_path.name:
+                    alt_name = curr_path.name.replace("am_leader_bi", "so101_leader_bi")
+                if alt_name and (curr_path.parent / alt_name).is_file():
+                    curr_path = curr_path.parent / alt_name
+            super().load_calibration(curr_path)
+        except Exception:
+            pass
+        return self.calibration
+
+    def _heal_calibration_rom(self) -> bool:
+        """Ensure no joint has an abnormally narrow ROM (e.g. from an incomplete manual sweep)."""
+        if not self.calibration:
+            return False
+        healed = False
+        for motor, cal in self.calibration.items():
+            if (cal.range_max - cal.range_min) < 600 and motor in _GOLDEN_ROM_LIMITS:
+                g_min, g_max = _GOLDEN_ROM_LIMITS[motor]
+                logger.warning(
+                    f"[{self.id}] Healing narrow ROM on '{motor}' ({cal.range_min}..{cal.range_max} -> {g_min}..{g_max})"
+                )
+                cal.range_min = g_min
+                cal.range_max = g_max
+                healed = True
+        if healed:
+            self._save_calibration()
+        return healed
+
+    def sync_calibration_from_eeprom(self) -> bool:
+        """Read calibration parameters stored inside the STS3215 servos' EEPROM over USB."""
+        try:
+            eeprom_cal = self.bus.read_calibration()
+            has_valid_offset = any(abs(c.homing_offset) > 5 for c in eeprom_cal.values())
+            if not has_valid_offset:
+                return False
+            for motor, cal in eeprom_cal.items():
+                if (cal.range_max - cal.range_min) < 600 or (
+                    cal.range_min == 0 and cal.range_max == 4095 and motor != "wrist_roll"
+                ):
+                    if motor in _GOLDEN_ROM_LIMITS:
+                        cal.range_min, cal.range_max = _GOLDEN_ROM_LIMITS[motor]
+            self.calibration = eeprom_cal
+            self.bus.calibration = eeprom_cal
+            self._save_calibration()
+            logger.info(f"[{self.id}] Recovered calibration directly from servo EEPROM -> {self.calibration_fpath}")
+            return True
+        except Exception as e:
+            logger.debug(f"[{self.id}] EEPROM calibration recovery skipped: {e}")
+            return False
+
+    def calibrate_one_step(self) -> dict[str, MotorCalibration]:
+        """Instant 1-step calibration: lock 90-degree midpoint and apply Golden ROM template."""
+        self.bus.disable_torque()
+        for motor in self.bus.motors:
+            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+
+        homing_offsets = self.bus.set_half_turn_homings()
+        self.calibration = {}
+        for motor, m in self.bus.motors.items():
+            g_min, g_max = _GOLDEN_ROM_LIMITS.get(motor, (900, 3160))
+            self.calibration[motor] = MotorCalibration(
+                id=m.id,
+                drive_mode=0,
+                homing_offset=homing_offsets[motor],
+                range_min=g_min,
+                range_max=g_max,
+            )
+
+        self.bus.write_calibration(self.calibration)
+        self._save_calibration()
+        print(f"Calibration saved to {self.calibration_fpath}")
+        return self.calibration
+
     def calibrate(self) -> None:
         if self.calibration:
+            self._heal_calibration_rom()
             if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"} and not getattr(self, "_force_interactive", False):
                 logger.info(f"Auto-applying saved calibration file associated with the id {self.id} to the motors")
                 self.bus.write_calibration(self.calibration)
@@ -125,22 +235,21 @@ class SOLeader(Teleoperator):
                     self.bus.write_calibration(self.calibration)
                     return
 
+        # Try recovering calibration directly from the servos' internal EEPROM before prompting or failing
+        if not self.calibration and not getattr(self, "_force_interactive", False):
+            if self.sync_calibration_from_eeprom():
+                self.bus.write_calibration(self.calibration)
+                return
+
         # If not interactive calibration, prevent hanging on input()
         if os.environ.get("LEROBOT_AUTO_USE_CALIBRATION", "").strip().lower() in {"1", "true", "yes"} and not getattr(self, "_force_interactive", False):
-            # Check if partner arm calibration exists to borrow
-            other_id = self.id.replace("_left", "_right") if "_left" in self.id else self.id.replace("_right", "_left")
-            other_file = self.calibration_dir / f"{other_id}.json"
-            if other_file.is_file():
-                import shutil
-                shutil.copyfile(other_file, self.calibration_file)
-                logger.warning(f"主控臂 [{self.id}] 标定文件不存在，已自动复用对侧标定参数: {other_file}")
-                self.calibration = self.load_calibration()
-                if self.calibration:
-                    self.bus.write_calibration(self.calibration)
-                    return
             raise RuntimeError(
                 f"主控臂 [{self.id}] 尚未完成校准！请先运行「步骤 2：机械臂校准」，缺少标定文件: {self.calibration_file}"
             )
+
+        if getattr(self, "_one_step_mode", False):
+            self.calibrate_one_step()
+            return
 
         logger.info(f"\nRunning calibration of {self}")
         self.bus.disable_torque()
@@ -170,9 +279,90 @@ class SOLeader(Teleoperator):
                 range_max=range_maxes[motor],
             )
 
+        self._heal_calibration_rom()
         self.bus.write_calibration(self.calibration)
         self._save_calibration()
         print(f"Calibration saved to {self.calibration_fpath}")
+
+    @check_if_not_connected
+    def smooth_move_to_raw(
+        self,
+        target_raw: dict[str, int],
+        duration_s: float = 1.8,
+        torque_limit: int = 220,
+        release_after: bool = True,
+        hold_s: float = 0.4,
+    ) -> None:
+        """Gently drive the leader arm over USB to target raw encoder positions with compliance protection."""
+        import math
+
+        motors = [m for m in self.bus.motors if m in target_raw]
+        if not motors:
+            return
+
+        start_pos = self.bus.sync_read("Present_Position", motors, normalize=False)
+        for m in motors:
+            self.bus.write("Operating_Mode", m, OperatingMode.POSITION.value)
+            self.bus.write("Acceleration", m, 15, normalize=False)
+            self.bus.write("Goal_Velocity", m, 360, normalize=False)
+            self.bus.write("Torque_Limit", m, torque_limit, normalize=False)
+            self.bus.write("Goal_Position", m, int(start_pos[m]), normalize=False)
+            self.bus.write("Torque_Enable", m, 1, normalize=False)
+
+        steps = max(10, int(duration_s * 30))
+        dt = duration_s / steps
+        blocked_motors: set[str] = set()
+
+        for step in range(1, steps + 1):
+            alpha = 0.5 * (1.0 - math.cos(math.pi * step / steps))
+            goals: dict[str, int] = {}
+            for m in motors:
+                if m in blocked_motors:
+                    continue
+                s = float(start_pos[m])
+                t = float(target_raw[m])
+                goals[m] = int(round(s + (t - s) * alpha))
+
+            if goals:
+                self.bus.sync_write("Goal_Position", goals, normalize=False)
+
+            # Check current for gentle obstacle yielding (> 420mA = ~65 raw units)
+            if step % 3 == 0:
+                try:
+                    currents = self.bus.sync_read("Present_Current", motors, normalize=False)
+                    for m, raw_cur in currents.items():
+                        if abs(int(raw_cur)) > 65 and m not in blocked_motors:
+                            logger.info(f"[{self.id}] Motor '{m}' yielded to external touch/obstacle")
+                            blocked_motors.add(m)
+                            self.bus.write("Torque_Enable", m, 0, normalize=False)
+                except Exception:
+                    pass
+
+            time.sleep(dt)
+
+        if hold_s > 0:
+            time.sleep(hold_s)
+
+        if release_after:
+            self.bus.disable_torque()
+
+    @check_if_not_connected
+    def auto_home(
+        self,
+        duration_s: float = 1.8,
+        torque_limit: int = 220,
+        hold_s: float = 0.8,
+        release_after: bool = True,
+    ) -> None:
+        """Gently return all leader arm joints to their 90-degree calibrated midpoint (2048)."""
+        targets = {m: 2048 for m in self.bus.motors}
+        self.smooth_move_to_raw(
+            targets,
+            duration_s=duration_s,
+            torque_limit=torque_limit,
+            hold_s=hold_s,
+            release_after=release_after,
+        )
 
     def configure(self) -> None:
         self.bus.disable_torque()

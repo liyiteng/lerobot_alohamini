@@ -142,6 +142,16 @@ if not NO_LEADER:
     print("🎮 正在连接左右示教主臂...")
     leader.connect()
     print("✅ 左右示教主臂已连接！")
+    if not NO_ROBOT and robot.is_connected and leader.is_connected:
+        try:
+            print("🚀 [防暴冲柔顺对齐] 正在让主控臂轻柔对齐机器人当前姿态...")
+            initial_obs = robot.get_observation()
+            state_obs = initial_obs.get("state", {})
+            if isinstance(state_obs, dict) and state_obs:
+                leader.sync_to_pose(state_obs, duration_s=1.2, torque_limit=220, release_after=True)
+                print("✔ 主从姿态已平稳对齐，遥操作平顺起步。")
+        except Exception:
+            pass
 else:
     print("🧪 leader.connect() 已跳过。")
 
