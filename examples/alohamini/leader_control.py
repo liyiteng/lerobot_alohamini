@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
         required=True,
         choices=[
             "auto_home",
+            "auto_pose",
+            "auto_pose_and_calibrate",
             "one_step_calibrate",
             "check_calibration",
             "heal_calibration",
@@ -271,6 +273,31 @@ def main() -> None:
             )
             state_msg = "已轻柔锁定在 90° 中位" if args.hold else "已回到 90° 中位并释放力矩"
             print(f"✔ [一键归零完毕] 双主臂{state_msg}。")
+
+        elif args.action == "auto_pose":
+            print("🚀 [舵机自动立正] 正在通过微电流柔顺驱动双主臂缓缓升起并折成 90° 直角...")
+            leader.auto_home(
+                duration_s=args.duration if args.duration > 0 else 2.2,
+                torque_limit=args.torque_limit,
+                hold_s=1.0,
+                release_after=not args.hold,
+            )
+            state_msg = "已轻柔锁定在 90° 直角姿态（可目视确认）" if args.hold else "已立正到 90° 直角位并释放力矩"
+            print(f"✔ [自动立正完毕] 双主臂{state_msg}。")
+
+        elif args.action == "auto_pose_and_calibrate":
+            print("🚀 [全自动立正与标定] 舵机正在通电并缓缓自动升起至 90° 直角理论位...")
+            leader.auto_home(
+                duration_s=2.4,
+                torque_limit=args.torque_limit,
+                hold_s=1.0,
+                release_after=False,
+            )
+            print("🎯 [锁定零位与注入行程] 姿态已到位，正在固化 90° 零位并写入黄金机械行程...")
+            leader.calibrate_one_step()
+            leader.left_arm.disable_torque()
+            leader.right_arm.disable_torque()
+            print("✔ [全自动标定完成] 双主臂已完成自动立正、零点校准与黄金行程写入，力矩已安全释放！")
 
         elif args.action == "one_step_calibrate":
             print("🎯 [一键极速标定] 正在以当前姿态锁定 90° 中位零点并写入标准物理行程...")
