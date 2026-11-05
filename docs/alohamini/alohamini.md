@@ -146,7 +146,11 @@ The Host runs command handling, feedback, watchdog, and safety checks at 50 Hz.
 Follower servos apply the shared position-mode velocity and acceleration profile,
 so normal teleoperation retains direct target semantics without unbounded motion.
 Native teleoperation also defaults to 50 Hz command control while requesting camera
-frames independently at 30 Hz. To expose the non-blocking ROS camera stream on TCP
+frames independently at 30 Hz. Delayed responses survive individual poll timeouts,
+and a slow link automatically reduces the request window to one. Existing commands
+need no additional options; actual control frequency follows network throughput.
+The 1 second feedback and command watchdog limits remain in effect.
+To expose the non-blocking ROS camera stream on TCP
 port 5557, add `--camera-stream` to the selected Host command.
 ROS state requests on port 5556 omit camera acquisition, while legacy LeRobot
 clients keep receiving the same state-plus-image multipart response.
