@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
             "check_calibration",
             "heal_calibration",
             "release_torque",
+            "identify_left",
         ],
         help="Action to execute on leader arms",
     )
@@ -290,6 +291,71 @@ def main() -> None:
             leader.left_arm.disable_torque()
             leader.right_arm.disable_torque()
             print("✔ 双臂力矩已释放。")
+
+        elif args.action == "identify_left":
+            print("👉 请在接下来的 3.5 秒内，用手轻轻晃动【左主控臂】（摆动任意关节均可）...")
+            time.sleep(0.5)
+
+            start_t = time.time()
+            l_samples = []
+            r_samples = []
+
+            while time.time() - start_t < 3.0:
+                try:
+                    lp = leader.left_arm.bus.read("Present_Position")
+                    rp = leader.right_arm.bus.read("Present_Position")
+                    l_samples.append(list(lp.values()) if isinstance(lp, dict) else list(lp))
+                    r_samples.append(list(rp.values()) if isinstance(rp, dict) else list(rp))
+                except Exception:
+                    pass
+                time.sleep(0.04)
+
+            def get_arm_delta(samples):
+                if not samples or len(samples) < 2:
+                    return 0
+                max_d = 0
+                joints_cnt = len(samples[0])
+                for j in range(joints_cnt):
+                    col = [s[j] for s in samples if j < len(s)]
+                    if col:
+                        max_d = max(max_d, max(col) - min(col))
+                return max_d
+
+            delta_l = get_arm_delta(l_samples)
+            delta_r = get_arm_delta(r_samples)
+
+            THRESHOLD = 50
+            if delta_l >= THRESHOLD and delta_l > delta_r * 1.4:
+                left_port = args.left_port
+                right_port = args.right_port
+                success = True
+                msg = f"✔ [晃动识别成功] 检测到左臂晃动 (位移 {delta_l} 步 vs {delta_r} 步)，已确认当前绑定正确！"
+            elif delta_r >= THRESHOLD and delta_r > delta_l * 1.4:
+                left_port = args.right_port
+                right_port = args.left_port
+                success = True
+                msg = f"✔ [晃动识别成功] 检测到左臂晃动 (位移 {delta_r} 步 vs {delta_l} 步)，左右串口已自动为您对调！"
+            elif delta_l < THRESHOLD and delta_r < THRESHOLD:
+                left_port = args.left_port
+                right_port = args.right_port
+                success = False
+                msg = f"⚠ 未检测到明显的晃动（最大位移仅 {max(delta_l, delta_r)} 步），请点击重试并在倒计时内晃动左臂。"
+            else:
+                left_port = args.left_port
+                right_port = args.right_port
+                success = False
+                msg = f"⚠ 检测到两只手臂都在动（左={delta_l}，右={delta_r}），请重试并仅晃动左侧手臂。"
+
+            result = {
+                "success": success,
+                "detected_left": left_port,
+                "detected_right": right_port,
+                "delta_left": delta_l,
+                "delta_right": delta_r,
+                "message": msg,
+            }
+            print(f"__IDENTIFY_RESULT__{json.dumps(result, ensure_ascii=False)}")
+            print(msg)
 
     finally:
         leader.disconnect()
