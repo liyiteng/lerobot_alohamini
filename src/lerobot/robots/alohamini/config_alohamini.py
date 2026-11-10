@@ -21,6 +21,7 @@ from ..config import RobotConfig
 
 
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
+    """Default camera config: single forward camera + wrist_right, 640x480."""
     return {
         "forward": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward",
@@ -29,20 +30,54 @@ def alohamini_cameras_config() -> dict[str, CameraConfig]:
             height=480,
             rotation=Cv2Rotation.NO_ROTATION,
         ),
-        # "backward": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_backward", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "chest": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_chest", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "wrist_left": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
         "wrist_right": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_wrist_right",
             fps=30,
             width=640,
             height=480,
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+    }
+
+
+def alohamini2edu_cameras_config() -> dict[str, CameraConfig]:
+    """Binocular forward rig: forward_left + forward_right + wrist_right, 320x240.
+
+    Two physical sensors mounted side-by-side, each with its own USB port and
+    udev alias. Resolution is lowered to 320x240 because three UVC streams at
+    640x480 saturate the Raspberry Pi USB bus.
+
+    To disable a camera, comment out its entry. To enable it, remove the '#'.
+    """
+    return {
+        "forward_left": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_forward_left",
+            fps=30,
+            width=320,
+            height=240,
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        "forward_right": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_forward_right",
+            fps=30,
+            width=320,
+            height=240,
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        # "backward": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_backward", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "chest": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_chest", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        # "wrist_left": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
+        # ),
+        "wrist_right": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_wrist_right",
+            fps=30,
+            width=320,
+            height=240,
             rotation=Cv2Rotation.NO_ROTATION,
         ),
     }
@@ -62,8 +97,8 @@ class AlohaMiniConfig(RobotConfig):
     robot_model: str = "alohamini2"
 
     # `max_relative_target` limits each commanded position's lead over measured
-    # feedback. Keep it optional because the actuator motion profile below is the
-    # primary speed/acceleration constraint.
+    # feedback. Keep it optional because the actuator motion profile below is
+    # the primary speed/acceleration constraint.
     max_relative_target: float | dict[str, float] | None = None
 
     # Native Feetech position-mode motion profile, in raw register units. Keeping
@@ -87,6 +122,19 @@ class AlohaMiniConfig(RobotConfig):
             raise ValueError("arm_goal_velocity must be in [1, 3400].")
         if not 1 <= self.arm_acceleration <= 254:
             raise ValueError("arm_acceleration must be in [1, 254].")
+
+
+@RobotConfig.register_subclass("alohamini2edu")
+@dataclass
+class AlohaMini2EduConfig(AlohaMiniConfig):
+    """AlohaMini with a binocular forward rig (forward_left + forward_right).
+
+    Same arm/base/lift hardware specs as alohamini2pro, but with three cameras
+    (forward_left, forward_right, wrist_right) at 320x240 instead of the legacy
+    single forward camera at 640x480.
+    """
+
+    cameras: dict[str, CameraConfig] = field(default_factory=alohamini2edu_cameras_config)
 
 
 @dataclass
@@ -128,9 +176,10 @@ class AlohaMiniClientConfig(RobotConfig):
     lift_target_max_lead_mm: float = 50.0
 
     # Must match the robot_model used on the host side so that _state_ft keys are consistent.
-    # alohamini1   – so-arm-5dof (6 joints per arm, no wrist_yaw)
-    # alohamini2   – am-follower-6dof (7 joints per arm, includes wrist_yaw)
-    # alohamini2pro– am-follower-6dof-hd (7 joints per arm, includes wrist_yaw)
+    # alohamini1      – so-arm-5dof (6 joints per arm, no wrist_yaw)
+    # alohamini2      – am-follower-6dof (7 joints per arm, includes wrist_yaw)
+    # alohamini2pro   – am-follower-6dof-hd (7 joints per arm, includes wrist_yaw)
+    # alohamini2edu – same 7-DOF arms, binocular forward rig (3 cameras)
     robot_model: str = "alohamini1"
 
     teleop_keys: dict[str, str] = field(
@@ -156,5 +205,10 @@ class AlohaMiniClientConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
     # Must exceed one host cycle at 50 Hz for request/reply observation transport.
-    polling_timeout_ms: int = 200
+    polling_timeout_ms: int = 300
     connect_timeout_s: int = 5
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.robot_model == "alohamini2edu":
+            object.__setattr__(self, "cameras", alohamini2edu_cameras_config())

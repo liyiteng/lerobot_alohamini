@@ -86,7 +86,7 @@ def main():
         dest="robot_model",
         type=str,
         default="alohamini1",
-        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        choices=["alohamini1", "alohamini2", "alohamini2pro", "alohamini2edu"],
         help="Must match the robot_model on the Pi host side",
     )
     parser.add_argument(
