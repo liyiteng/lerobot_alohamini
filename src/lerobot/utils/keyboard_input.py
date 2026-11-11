@@ -280,7 +280,7 @@ class TerminalKeyListener:
         # version-specific behavior of tty.setcbreak.)
         new_attrs = termios.tcgetattr(self._fd)
         new_attrs[3] &= ~termios.ECHO  # index 3 == lflags
-        termios.tcsetattr(self._fd, termios.TCSADRAIN, new_attrs)
+        termios.tcsetattr(self._fd, termios.TCSANOW, new_attrs)
         # Safety net: restore the terminal even if stop() is never reached (crash).
         atexit.register(self.stop)
 
@@ -357,8 +357,9 @@ def create_key_listener(dispatch: Callable[[str], None], *, controls_help: str =
     Returns the listener (exposing ``.stop()``) or ``None``.
     """
     suffix = f" ({controls_help})" if controls_help else ""
+    force_tty = os.environ.get("LEROBOT_FORCE_TTY_INPUT", "").lower() in ("1", "true", "yes")
 
-    if pynput_can_capture() and keyboard is not None:
+    if not force_tty and pynput_can_capture() and keyboard is not None:
 
         def on_press(key):
             with contextlib.suppress(Exception):

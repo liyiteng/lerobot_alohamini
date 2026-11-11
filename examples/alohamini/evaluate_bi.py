@@ -2,8 +2,10 @@
 
 import argparse
 import inspect
+import json
 import logging
 import math
+import shutil
 import time
 
 import lerobot.robots.alohamini  # noqa: F401 — registers alohamini_client robot type
@@ -21,9 +23,10 @@ from lerobot.rollout.inference.factory import (
 )
 from lerobot.rollout.robot_wrapper import ThreadSafeRobot
 from lerobot.utils.action_interpolator import ActionInterpolator
-from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME, OBS_STR
 from lerobot.utils.device_utils import auto_select_torch_device
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
+from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
@@ -200,6 +203,21 @@ def main():
     ordered_action_keys = list(action_features_hw.keys())
 
     # === Dataset ===
+    eval_root = HF_LEROBOT_HOME / args.dataset_repo_id
+    if eval_root.exists():
+        info_file = eval_root / "meta" / "info.json"
+        has_eps = False
+        if info_file.exists():
+            try:
+                with open(info_file) as f:
+                    has_eps = int(json.load(f).get("total_episodes", 0)) > 0
+            except Exception:
+                has_eps = False
+        if not has_eps:
+            shutil.rmtree(eval_root, ignore_errors=True)
+        else:
+            args.dataset_repo_id = f"{args.dataset_repo_id}_{int(time.time())}"
+
     dataset = LeRobotDataset.create(
         repo_id=args.dataset_repo_id,
         fps=args.fps,
@@ -233,6 +251,7 @@ def main():
     )
 
     # init_rerun(session_name="alohamini_evaluate")
+    listener, events = init_keyboard_listener()
     log_say("Starting evaluation")
 
     interpolator = ActionInterpolator(multiplier=args.interpolation_multiplier)
@@ -247,12 +266,12 @@ def main():
 
         deadline = time.monotonic() + args.reset_time
         last_remaining = None
-        while True:
+        while not events["exit_early"] and not events["stop_recording"]:
             remaining = max(0, math.ceil(deadline - time.monotonic()))
             if remaining != last_remaining:
                 print(
                     f"\r[RESET] Prepare evaluation episode {next_episode}/{args.num_episodes}: "
-                    f"{remaining}s remaining",
+                    f"{remaining}s remaining (Press -> / n to start immediately)",
                     end="",
                     flush=True,
                 )
@@ -266,11 +285,17 @@ def main():
             sleep_t = min(control_interval, max(0.0, deadline - time.monotonic()))
             if sleep_t > 0:
                 precise_sleep(sleep_t)
+        events["exit_early"] = False
         print(flush=True)
 
     try:
-        while recorded < args.num_episodes:
+        while recorded < args.num_episodes and not events["stop_recording"]:
             log_say(f"Eval episode {recorded + 1} of {args.num_episodes}")
+            print(
+                f"\n[EVAL] Starting episode {recorded + 1}/{args.num_episodes} "
+                f"(Press -> / n to finish episode early, Esc / q to stop evaluation)",
+                flush=True,
+            )
             stop_inference(engine)
             engine.reset()
             engine.start()
@@ -279,9 +304,23 @@ def main():
             start = time.perf_counter()
             restart_pending = False
             episode_frames = 0
+            last_remaining_print = None
 
-            while (time.perf_counter() - start) < args.episode_time:
+            while (
+                (time.perf_counter() - start) < args.episode_time
+                and not events["exit_early"]
+                and not events["stop_recording"]
+            ):
                 loop_start = time.perf_counter()
+                remaining_s = max(0, math.ceil(args.episode_time - (loop_start - start)))
+                if remaining_s != last_remaining_print:
+                    print(
+                        f"\r[EVAL ] Ep {recorded + 1}/{args.num_episodes} | "
+                        f"{remaining_s:>3}s remaining | Frames: {episode_frames}",
+                        end="",
+                        flush=True,
+                    )
+                    last_remaining_print = remaining_s
 
                 obs_raw = robot.get_observation()
                 previous_context = safety_guard.context
@@ -343,15 +382,19 @@ def main():
                 if (sleep_t := control_interval - dt) > 0:
                     precise_sleep(sleep_t)
 
+            print(flush=True)
+            events["exit_early"] = False
             engine.pause()
             if episode_frames:
                 dataset.save_episode()
             else:
                 logging.warning("No evaluation frames collected; skipping empty episode.")
             recorded += 1
-            if recorded < args.num_episodes:
+            if recorded < args.num_episodes and not events["stop_recording"]:
                 reset_environment(recorded + 1)
     finally:
+        if listener is not None:
+            listener.stop()
         engine.pause()
         try:
             robot.send_action(hold_action(robot.last_remote_state))
