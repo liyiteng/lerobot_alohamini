@@ -51,8 +51,22 @@ def parse_args() -> argparse.Namespace:
             "heal_calibration",
             "release_torque",
             "identify_left",
+            "align_to_follower",
         ],
         help="Action to execute on leader arms",
+    )
+    parser.add_argument(
+        "--remote_ip",
+        type=str,
+        default=os.environ.get("ALOHAMINI_PI_IP", "192.168.10.2"),
+        help="Robot Pi host IP address",
+    )
+    parser.add_argument(
+        "--robot_model",
+        type=str,
+        default="alohamini2pro",
+        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        help="Robot model type",
     )
     parser.add_argument(
         "--teleop.id",
@@ -383,6 +397,58 @@ def main() -> None:
             }
             print(f"__IDENTIFY_RESULT__{json.dumps(result, ensure_ascii=False)}")
             print(msg)
+
+        elif args.action == "align_to_follower":
+            print(f"🚀 [防暴冲贴合] 正在读取从臂机器人 ({args.remote_ip}) 实时关节姿态...")
+            from lerobot.robots.alohamini.alohamini_client import AlohaMiniClient, AlohaMiniClientConfig
+            robot_client = None
+            try:
+                r_cfg = AlohaMiniClientConfig(
+                    remote_ip=args.remote_ip,
+                    id="alohamini_align_check",
+                    robot_model=args.robot_model,
+                    connect_timeout_s=2.0,
+                )
+                robot_client = AlohaMiniClient(r_cfg)
+                robot_client.connect()
+                obs = robot_client.get_observation()
+                target_pose = obs.get("state", {}) if isinstance(obs, dict) else {}
+                if not target_pose and isinstance(obs, dict):
+                    target_pose = {k: v for k, v in obs.items() if k.endswith(".pos")}
+                
+                if target_pose:
+                    print(f"🎯 [姿态平滑对齐] 正在以 {args.torque_limit} 安全微力矩驱动主控臂贴合从臂姿态...")
+                    leader.sync_to_pose(
+                        target_pose,
+                        duration_s=args.duration if args.duration > 0 else 1.4,
+                        torque_limit=args.torque_limit,
+                        release_after=True,
+                    )
+                    align_res = {
+                        "success": True,
+                        "message": "主从姿态已平稳贴合，遥操作可平顺起步，已解除暴冲隐患。",
+                    }
+                    print(f"__ALIGN_RESULT__{json.dumps(align_res, ensure_ascii=False)}")
+                    print("✔ [贴合完成] 主控臂已就位，力矩已释放为零阻尼操作模式。")
+                else:
+                    align_res = {
+                        "success": False,
+                        "message": "未能从机器人读取到有效关节角度状态。",
+                    }
+                    print(f"__ALIGN_RESULT__{json.dumps(align_res, ensure_ascii=False)}")
+            except Exception as e:
+                align_res = {
+                    "success": False,
+                    "message": f"连接机器人获取姿态异常: {e}",
+                }
+                print(f"__ALIGN_RESULT__{json.dumps(align_res, ensure_ascii=False)}")
+                print(f"⚠ 未能连接机器人从臂 ({e})，防暴冲贴合跳过。")
+            finally:
+                if robot_client and robot_client.is_connected:
+                    try:
+                        robot_client.disconnect()
+                    except Exception:
+                        pass
 
     finally:
         leader.disconnect()

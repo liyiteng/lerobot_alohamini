@@ -205,6 +205,52 @@ def main():
         default=True,
         help="Align leader arm to follower pose before starting to prevent teleoperation jumps.",
     )
+    parser.add_argument(
+        "--follower-auto-reset",
+        "--follower_auto_reset",
+        dest="follower_auto_reset",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Auto-reset follower arm to standard home posture between episodes.",
+    )
+    parser.add_argument(
+        "--pose-perturbation",
+        "--pose_perturbation",
+        dest="pose_perturbation",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Apply slight random pose perturbation (+/- N deg) during reset for generalization.",
+    )
+    parser.add_argument(
+        "--perturbation-deg",
+        "--perturbation_deg",
+        dest="perturbation_deg",
+        type=float,
+        default=3.5,
+        help="Max angle perturbation in degrees for initial pose randomization.",
+    )
+    parser.add_argument(
+        "--auto-discard-short",
+        "--auto_discard_short",
+        dest="auto_discard_short",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Automatically intercept and discard episodes shorter than min-episode-seconds.",
+    )
+    parser.add_argument(
+        "--min-episode-seconds",
+        "--min_episode_seconds",
+        dest="min_episode_seconds",
+        type=float,
+        default=2.0,
+        help="Minimum valid episode duration in seconds; shorter episodes are flagged/discarded.",
+    )
 
     args = parser.parse_args()
 
@@ -377,6 +423,28 @@ def main():
                 leader_arm.auto_home(duration_s=1.5, torque_limit=200, hold_s=0.5, release_after=True)
             except Exception:
                 pass
+
+        if args.follower_auto_reset and robot.is_connected:
+            try:
+                import random
+                # Compute home target pose for follower arms
+                home_action = {}
+                home_action.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+                for key in robot.action_features:
+                    if key.endswith(".pos"):
+                        target_val = 0.0
+                        if args.pose_perturbation:
+                            jitter = random.uniform(-args.perturbation_deg, args.perturbation_deg) / 180.0
+                            target_val += jitter
+                        home_action[key] = target_val
+                # Smoothly send homing action at control fps for up to 1.2s
+                steps = int(min(args.reset_time, 1.2) * args.fps)
+                for _ in range(steps):
+                    robot.send_action(home_action)
+                    time.sleep(1.0 / args.fps)
+                print("✔ [集间自动复位] 从臂已自动归位至初始待命姿态。", flush=True)
+            except Exception as e:
+                logging.debug(f"Follower auto-reset skipped: {e}")
         try:
             record_loop(
                 robot=robot,
@@ -475,12 +543,20 @@ def main():
                 f"({recorded_frames} frames in {recording_elapsed_s:.2f}s; target {args.fps} FPS)",
                 flush=True,
             )
-            if recorded_frames < 2.5 * args.fps and not events["rerecord_episode"]:
-                sec = recorded_frames / args.fps
-                print(
-                    f"\r\n\x1b[1;33m[Smart QA 提醒] ⚠ 本集有效时长偏短（仅 {sec:.1f} 秒），如属误触可随时重录。\x1b[0m\r\n",
-                    flush=True,
-                )
+            min_frames = int(args.min_episode_seconds * args.fps)
+            if recorded_frames < min_frames and not events["rerecord_episode"]:
+                sec = recorded_frames / args.fps if args.fps > 0 else 0.0
+                if args.auto_discard_short:
+                    print(
+                        f"\r\n\x1b[1;31m[废片拦截清洗] 🚫 本集仅录制 {sec:.1f} 秒 (< {args.min_episode_seconds}s)，判定为无效误录，已自动拦截清洗并放弃保存！\x1b[0m\r\n",
+                        flush=True,
+                    )
+                    events["rerecord_episode"] = True
+                else:
+                    print(
+                        f"\r\n\x1b[1;33m[Smart QA 提醒] ⚠ 本集有效时长偏短（仅 {sec:.1f} 秒），如属误触可随时重录。\x1b[0m\r\n",
+                        flush=True,
+                    )
 
     while recorded_episodes < args.num_episodes and not events["stop_recording"]:
         episode_number = dataset.num_episodes + 1
