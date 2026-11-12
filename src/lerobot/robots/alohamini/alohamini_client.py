@@ -697,7 +697,7 @@ class AlohaMiniClient(Robot):
 
     @property
     def command_permitted(self) -> bool:
-        return self.latest_safety_status.get("control_owner") in (None, self._client_id)
+        return not self.latest_safety_status.get("software_stop", {}).get("latched", False) and self.latest_safety_status.get("control_owner") in (None, self._client_id)
 
     @check_if_not_connected
     def disconnect(self):

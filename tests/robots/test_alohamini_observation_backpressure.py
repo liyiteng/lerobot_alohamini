@@ -10,7 +10,8 @@ from lerobot.robots.alohamini.config_alohamini import AlohaMiniClientConfig
 
 @pytest.fixture
 def client():
-    robot = AlohaMiniClient(AlohaMiniClientConfig(remote_ip="127.0.0.1", cameras={}))
+    # 测试三请求窗口中的背压恢复，不依赖生产环境的默认窗口大小。
+    robot = AlohaMiniClient(AlohaMiniClientConfig(remote_ip="127.0.0.1", cameras={}, observation_request_window=3))
     robot._is_connected = True
     robot.zmq_observation_socket = Mock()
     robot.zmq_cmd_socket = Mock()

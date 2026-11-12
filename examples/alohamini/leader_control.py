@@ -411,7 +411,11 @@ def main() -> None:
                 )
                 robot_client = AlohaMiniClient(r_cfg)
                 robot_client.connect()
-                obs = robot_client.get_observation()
+                obs = robot_client.refresh_observation()
+                if not robot_client.observation_updated or not robot_client.control_feedback_valid:
+                    raise RuntimeError("从臂反馈缺失或过期，拒绝姿态贴合")
+                if robot_client.latest_safety_status.get("software_stop", {}).get("latched"):
+                    raise RuntimeError("Host 已锁定停止，拒绝姿态贴合")
                 target_pose = obs.get("state", {}) if isinstance(obs, dict) else {}
                 if not target_pose and isinstance(obs, dict):
                     target_pose = {k: v for k, v in obs.items() if k.endswith(".pos")}
@@ -426,7 +430,7 @@ def main() -> None:
                     )
                     align_res = {
                         "success": True,
-                        "message": "主从姿态已平稳贴合，遥操作可平顺起步，已解除暴冲隐患。",
+                        "message": "主臂姿态贴合操作已完成，请扶稳主臂并确认姿态。",
                     }
                     print(f"__ALIGN_RESULT__{json.dumps(align_res, ensure_ascii=False)}")
                     print("✔ [贴合完成] 主控臂已就位，力矩已释放为零阻尼操作模式。")

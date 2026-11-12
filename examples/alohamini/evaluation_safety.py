@@ -48,6 +48,8 @@ class EvaluationSafetyGuard:
         received_at = getattr(robot, "_last_safety_received_at", None)
         if status.get("version") != 1:
             return "Host 未提供保护状态，请更新树莓派 Host"
+        if status.get("software_stop", {}).get("latched"):
+            return "Host 已锁定停止，请检查现场并手动重新启动 Host"
         if not getattr(robot, "command_permitted", True):
             return "控制权由其他客户端持有"
         if not getattr(robot, "control_feedback_valid", True):

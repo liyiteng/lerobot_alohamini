@@ -292,6 +292,7 @@ class SOLeader(Teleoperator):
         torque_limit: int = 220,
         release_after: bool = True,
         hold_s: float = 0.4,
+        fail_on_yield: bool = False,
     ) -> None:
         """Gently drive the leader arm over USB to target raw encoder positions with compliance protection."""
         import math
@@ -301,50 +302,55 @@ class SOLeader(Teleoperator):
             return
 
         start_pos = self.bus.sync_read("Present_Position", motors, normalize=False)
-        for m in motors:
-            self.bus.write("Operating_Mode", m, OperatingMode.POSITION.value)
-            self.bus.write("Acceleration", m, 15, normalize=False)
-            self.bus.write("Goal_Velocity", m, 360, normalize=False)
-            self.bus.write("Torque_Limit", m, torque_limit, normalize=False)
-            self.bus.write("Goal_Position", m, int(start_pos[m]), normalize=False)
-            self.bus.write("Torque_Enable", m, 1, normalize=False)
-
-        steps = max(10, int(duration_s * 30))
-        dt = duration_s / steps
-        blocked_motors: set[str] = set()
-
-        for step in range(1, steps + 1):
-            alpha = 0.5 * (1.0 - math.cos(math.pi * step / steps))
-            goals: dict[str, int] = {}
+        try:
             for m in motors:
-                if m in blocked_motors:
-                    continue
-                s = float(start_pos[m])
-                t = float(target_raw[m])
-                goals[m] = int(round(s + (t - s) * alpha))
+                self.bus.write("Operating_Mode", m, OperatingMode.POSITION.value)
+                self.bus.write("Acceleration", m, 15, normalize=False)
+                self.bus.write("Goal_Velocity", m, 360, normalize=False)
+                self.bus.write("Torque_Limit", m, torque_limit, normalize=False)
+                self.bus.write("Goal_Position", m, int(start_pos[m]), normalize=False)
+                self.bus.write("Torque_Enable", m, 1, normalize=False)
 
-            if goals:
-                self.bus.sync_write("Goal_Position", goals, normalize=False)
+            steps = max(10, int(duration_s * 30))
+            dt = duration_s / steps
+            blocked_motors: set[str] = set()
 
-            # Check current for gentle obstacle yielding (> 420mA = ~65 raw units)
-            if step % 3 == 0:
-                try:
-                    currents = self.bus.sync_read("Present_Current", motors, normalize=False)
-                    for m, raw_cur in currents.items():
-                        if abs(int(raw_cur)) > 65 and m not in blocked_motors:
-                            logger.info(f"[{self.id}] Motor '{m}' yielded to external touch/obstacle")
-                            blocked_motors.add(m)
-                            self.bus.write("Torque_Enable", m, 0, normalize=False)
-                except Exception:
-                    pass
+            for step in range(1, steps + 1):
+                alpha = 0.5 * (1.0 - math.cos(math.pi * step / steps))
+                goals: dict[str, int] = {}
+                for m in motors:
+                    if m in blocked_motors:
+                        continue
+                    s = float(start_pos[m])
+                    t = float(target_raw[m])
+                    goals[m] = int(round(s + (t - s) * alpha))
 
-            time.sleep(dt)
+                if goals:
+                    self.bus.sync_write("Goal_Position", goals, normalize=False)
 
-        if hold_s > 0:
-            time.sleep(hold_s)
+                # Check current for gentle obstacle yielding (> 420mA = ~65 raw units)
+                if step % 3 == 0:
+                    try:
+                        currents = self.bus.sync_read("Present_Current", motors, normalize=False)
+                        for m, raw_cur in currents.items():
+                            if abs(int(raw_cur)) > 65 and m not in blocked_motors:
+                                logger.info(f"[{self.id}] Motor '{m}' yielded to external touch/obstacle")
+                                blocked_motors.add(m)
+                                self.bus.write("Torque_Enable", m, 0, normalize=False)
+                                if fail_on_yield:
+                                    raise RuntimeError(f"关节 {m} 触发避让，姿态贴合未完成")
+                    except Exception:
+                        if fail_on_yield:
+                            raise
 
-        if release_after:
-            self.bus.disable_torque()
+                time.sleep(dt)
+
+            if hold_s > 0:
+                time.sleep(hold_s)
+
+        finally:
+            if release_after:
+                self.bus.disable_torque()
 
     @check_if_not_connected
     def auto_home(
