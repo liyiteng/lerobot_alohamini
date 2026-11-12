@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import logging
 import math
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -117,7 +119,34 @@ def main():
         choices=["so-arm-5dof", "am-leader-6dof"],
         help="Leader arm profile selector.",
     )
-    parser.add_argument("--resume", action="store_true", help="Resume recording on existing dataset")
+    parser.add_argument(
+        "--teleop.left_port",
+        "--leader.left_port",
+        "--left_port",
+        dest="left_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_LEFT_PORT", "/dev/cu.usbmodem5B910458311"),
+        help="Left leader arm serial port.",
+    )
+    parser.add_argument(
+        "--teleop.right_port",
+        "--leader.right_port",
+        "--right_port",
+        dest="right_port",
+        type=str,
+        default=os.environ.get("ALOHAMINI_RIGHT_PORT", "/dev/cu.usbmodem5B790175581"),
+        help="Right leader arm serial port.",
+    )
+    parser.add_argument(
+        "--resume",
+        "--dataset.resume",
+        dest="resume",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Resume recording on existing dataset",
+    )
     parser.add_argument(
         "--profile-timing",
         "--profile_timing",
@@ -146,6 +175,82 @@ def main():
         default=True,
         help="Whether to upload the dataset to Hugging Face Hub after recording.",
     )
+    parser.add_argument(
+        "--hands-free",
+        "--hands_free",
+        dest="hands_free",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Enable double-pinch gripper gestures for hands-free recording (right=next, left=rerecord).",
+    )
+    parser.add_argument(
+        "--auto-reset",
+        "--auto_reset",
+        dest="auto_reset",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Auto-home leader arm during reset phase so user can freely arrange physical scene.",
+    )
+    parser.add_argument(
+        "--anti-jerk",
+        "--anti_jerk",
+        dest="anti_jerk",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Align leader arm to follower pose before starting to prevent teleoperation jumps.",
+    )
+    parser.add_argument(
+        "--follower-auto-reset",
+        "--follower_auto_reset",
+        dest="follower_auto_reset",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Auto-reset follower arm to standard home posture between episodes.",
+    )
+    parser.add_argument(
+        "--pose-perturbation",
+        "--pose_perturbation",
+        dest="pose_perturbation",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Apply slight random pose perturbation (+/- N deg) during reset for generalization.",
+    )
+    parser.add_argument(
+        "--perturbation-deg",
+        "--perturbation_deg",
+        dest="perturbation_deg",
+        type=float,
+        default=3.5,
+        help="Max angle perturbation in degrees for initial pose randomization.",
+    )
+    parser.add_argument(
+        "--auto-discard-short",
+        "--auto_discard_short",
+        dest="auto_discard_short",
+        type=parse_bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Automatically intercept and discard episodes shorter than min-episode-seconds.",
+    )
+    parser.add_argument(
+        "--min-episode-seconds",
+        "--min_episode_seconds",
+        dest="min_episode_seconds",
+        type=float,
+        default=2.0,
+        help="Minimum valid episode duration in seconds; shorter episodes are flagged/discarded.",
+    )
 
     args = parser.parse_args()
 
@@ -157,11 +262,11 @@ def main():
     )
     leader_arm_config = BiSOLeaderConfig(
         left_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_left",
+            port=args.left_port,
             arm_profile=args.arm_profile,
         ),
         right_arm_config=SOLeaderConfig(
-            port="/dev/am_arm_leader_right",
+            port=args.right_port,
             arm_profile=args.arm_profile,
         ),
         id=args.leader_id,
@@ -174,13 +279,47 @@ def main():
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
+    # === Connect devices first so failed connections never leave empty dataset dirs ===
+    robot.connect()
+    leader_arm.connect()
+    keyboard.connect()
+
+    # Align leader arm to robot's current pose to prevent starting jerk
+    if args.anti_jerk and robot.is_connected and leader_arm.is_connected:
+        try:
+            print("🚀 [防暴冲柔顺对齐] 正在让主控臂轻柔对齐机器人当前姿态...", flush=True)
+            initial_obs = robot.get_observation()
+            state_obs = initial_obs.get("state", {})
+            if isinstance(state_obs, dict) and state_obs:
+                leader_arm.sync_to_pose(state_obs, duration_s=1.2, torque_limit=220, release_after=True)
+                print("✔ 主从姿态已平稳对齐，遥操作平顺起步。", flush=True)
+        except Exception as e:
+            logging.debug(f"Anti-jerk sync skipped: {e}")
+
     # === Dataset setup ===
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR)
     dataset_features = {**action_features, **obs_features}
     dataset_root = Path(args.dataset_root) if args.dataset_root else HF_LEROBOT_HOME / args.dataset_repo_id
 
-    if args.resume:
+    has_existing_episodes = False
+    if dataset_root.exists():
+        info_file = dataset_root / "meta" / "info.json"
+        if info_file.exists():
+            try:
+                with open(info_file) as f:
+                    info_data = json.load(f)
+                has_existing_episodes = int(info_data.get("total_episodes", 0)) > 0
+            except Exception:
+                has_existing_episodes = False
+        if not has_existing_episodes:
+            shutil.rmtree(dataset_root, ignore_errors=True)
+
+    should_resume = args.resume and has_existing_episodes
+    if not should_resume and has_existing_episodes and os.environ.get("LEROBOT_FORCE_TTY_INPUT") == "1":
+        should_resume = True
+
+    if should_resume:
         dataset = LeRobotDataset.resume(
             repo_id=args.dataset_repo_id,
             root=dataset_root,
@@ -197,15 +336,10 @@ def main():
             image_writer_threads=4,
         )
 
-    # === Connect devices ===
-    robot.connect()
-    leader_arm.connect()
-    keyboard.connect()
-
     listener, events = init_keyboard_listener()
 
-    if not robot.is_connected or not leader_arm.is_connected or not keyboard.is_connected:
-        raise ValueError("Robot or teleop is not connected!")
+    if not robot.is_connected or not leader_arm.is_connected:
+        raise ValueError("Robot or leader arm is not connected!")
     if args.display_data:
         init_visualization("rerun", session_name="alohamini_record")
     recorded_episodes = 0
@@ -284,6 +418,33 @@ def main():
 
         countdown_thread = threading.Thread(target=show_countdown, daemon=True)
         countdown_thread.start()
+        if args.auto_reset and leader_arm.is_connected:
+            try:
+                leader_arm.auto_home(duration_s=1.5, torque_limit=200, hold_s=0.5, release_after=True)
+            except Exception:
+                pass
+
+        if args.follower_auto_reset and robot.is_connected:
+            try:
+                import random
+                # Compute home target pose for follower arms
+                home_action = {}
+                home_action.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+                for key in robot.action_features:
+                    if key.endswith(".pos"):
+                        target_val = 0.0
+                        if args.pose_perturbation:
+                            jitter = random.uniform(-args.perturbation_deg, args.perturbation_deg) / 180.0
+                            target_val += jitter
+                        home_action[key] = target_val
+                # Smoothly send homing action at control fps for up to 1.2s
+                steps = int(min(args.reset_time, 1.2) * args.fps)
+                for _ in range(steps):
+                    robot.send_action(home_action)
+                    time.sleep(1.0 / args.fps)
+                print("✔ [集间自动复位] 从臂已自动归位至初始待命姿态。", flush=True)
+            except Exception as e:
+                logging.debug(f"Follower auto-reset skipped: {e}")
         try:
             record_loop(
                 robot=robot,
@@ -311,9 +472,11 @@ def main():
             robot.get_observation()
             if robot.observation_sequence == previous_sequence and time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"Episode {episode_number} did not receive a fresh observation before recording. "
+                    f"Episode {episode_number} did not receive a fresh observation before recording "
+                    f"(sequence stuck at {previous_sequence} for {robot.config.connect_timeout_s}s). "
                     "Recording was stopped to avoid saving cached reset frames."
                 )
+            time.sleep(0.01)
 
     def record_episode(episode_number: int) -> None:
         """Record one episode while displaying its remaining time."""
@@ -366,6 +529,7 @@ def main():
                 robot_observation_processor=robot_observation_processor,
                 timing_callback=print_record_timing if args.profile_timing else None,
                 display_data=args.display_data,
+                enable_hands_free=args.hands_free,
             )
         finally:
             recording_elapsed_s = time.monotonic() - recording_started_at
@@ -379,6 +543,20 @@ def main():
                 f"({recorded_frames} frames in {recording_elapsed_s:.2f}s; target {args.fps} FPS)",
                 flush=True,
             )
+            min_frames = int(args.min_episode_seconds * args.fps)
+            if recorded_frames < min_frames and not events["rerecord_episode"]:
+                sec = recorded_frames / args.fps if args.fps > 0 else 0.0
+                if args.auto_discard_short:
+                    print(
+                        f"\r\n\x1b[1;31m[废片拦截清洗] 🚫 本集仅录制 {sec:.1f} 秒 (< {args.min_episode_seconds}s)，判定为无效误录，已自动拦截清洗并放弃保存！\x1b[0m\r\n",
+                        flush=True,
+                    )
+                    events["rerecord_episode"] = True
+                else:
+                    print(
+                        f"\r\n\x1b[1;33m[Smart QA 提醒] ⚠ 本集有效时长偏短（仅 {sec:.1f} 秒），如属误触可随时重录。\x1b[0m\r\n",
+                        flush=True,
+                    )
 
     while recorded_episodes < args.num_episodes and not events["stop_recording"]:
         episode_number = dataset.num_episodes + 1
@@ -428,9 +606,12 @@ def main():
         events["exit_early"] = False
 
     # === Clean up ===
-    robot.disconnect()
-    leader_arm.disconnect()
-    keyboard.disconnect()
+    if robot.is_connected:
+        robot.disconnect()
+    if leader_arm.is_connected:
+        leader_arm.disconnect()
+    if keyboard.is_connected:
+        keyboard.disconnect()
     if listener is not None:
         listener.stop()
     print("Saving dataset...", flush=True)

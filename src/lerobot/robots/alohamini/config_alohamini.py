@@ -120,7 +120,7 @@ class AlohaMiniClientConfig(RobotConfig):
     remote_ip: str
     port_zmq_cmd: int = 5555
     port_zmq_observations: int = 5556
-    observation_request_window: int = 3
+    observation_request_window: int = 1
 
     # Keyboard lift control advances an absolute height target while held. Bound
     # its lead over measured feedback so release and reversal stay responsive.
@@ -156,5 +156,5 @@ class AlohaMiniClientConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
     # Must exceed one host cycle at 50 Hz for request/reply observation transport.
-    polling_timeout_ms: int = 200
-    connect_timeout_s: int = 5
+    polling_timeout_ms: int = 1000
+    connect_timeout_s: int = 10

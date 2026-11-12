@@ -28,6 +28,7 @@ import zmq
 from .alohamini import AlohaMini
 from .camera_stream import CameraStreamPublisher
 from .command_owner import CommandOwner
+from .software_stop import SoftwareStop
 from .config_alohamini import AlohaMiniConfig, AlohaMiniHostConfig
 
 
@@ -258,6 +259,7 @@ def main():
     watchdog_events = 0
     last_command_metadata = {}
     command_owner = CommandOwner()
+    software_stop = SoftwareStop()
     target_source = "none"
     has_received_command = False
     latest_action: dict[str, float] = {}
@@ -302,6 +304,13 @@ def main():
             }
             observation_done_t = time.perf_counter()
 
+            software_stop.request(request_token, robot.get_safety_status()["host_session_id"])
+            if software_stop.latched:
+                last_sent_action.update(software_stop.apply(robot, last_observation, command_owner))
+                target_source = "software_stop"
+                has_received_command = False
+                last_command_metadata = {}
+
             try:
                 msg = host.zmq_cmd_socket.recv_string(zmq.NOBLOCK)
                 data = dict(json.loads(msg))
@@ -324,7 +333,7 @@ def main():
                     validated_action[key] = numeric_value
                 if not validated_action:
                     raise ValueError("Received command contains no finite numeric action values.")
-                if command_owner.accept(command_metadata, robot.get_safety_status()["host_session_id"]):
+                if not software_stop.latched and command_owner.accept(command_metadata, robot.get_safety_status()["host_session_id"]):
                     latest_action = validated_action
                     last_command_metadata = command_metadata
                     target_source = "command"
@@ -366,7 +375,7 @@ def main():
                 has_received_command = False
                 command_owner.release()
 
-            if not command_received and not watchdog_tripped:
+            if not command_received and not watchdog_tripped and not software_stop.latched:
                 safety_corrections = robot.supervise_arm_motion()
                 last_sent_action.update(safety_corrections)
                 if safety_corrections:
@@ -390,6 +399,8 @@ def main():
                         "control_owner": command_owner.owner,
                         "control_epoch": command_owner.epoch,
                         "target_source": target_source,
+                        "software_stop_supported": True,
+                        "software_stop": software_stop.status(),
                     },
                 }
                 response_timings_ms: dict[str, float] = {}

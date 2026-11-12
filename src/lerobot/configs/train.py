@@ -15,6 +15,7 @@ import builtins
 import datetime as dt
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -234,10 +235,18 @@ class TrainPipelineConfig(HubMixin):
                 self.job_name = f"{self.env.type}_{active_cfg.type}"
 
         if not self.resume and isinstance(self.output_dir, Path) and self.output_dir.is_dir():
-            raise FileExistsError(
-                f"Output directory {self.output_dir} already exists and resume is {self.resume}. "
-                f"Please change your output directory so that {self.output_dir} is not overwritten."
-            )
+            if os.environ.get("LEROBOT_FORCE_TTY_INPUT") == "1":
+                ckpt_dir = self.output_dir / "checkpoints"
+                if ckpt_dir.is_dir() and any(ckpt_dir.iterdir()):
+                    now = dt.datetime.now()
+                    self.output_dir = Path(f"{self.output_dir}_{now:%Y%m%d_%H%M%S}")
+                else:
+                    shutil.rmtree(self.output_dir, ignore_errors=True)
+            else:
+                raise FileExistsError(
+                    f"Output directory {self.output_dir} already exists and resume is {self.resume}. "
+                    f"Please change your output directory so that {self.output_dir} is not overwritten."
+                )
         elif not self.output_dir:
             now = dt.datetime.now()
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"

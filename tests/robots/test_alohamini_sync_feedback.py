@@ -143,6 +143,8 @@ def test_actual_evaluation_loop_rechecks_feedback_after_sync_inference(monkeypat
     monkeypatch.setattr(evaluate_bi, "create_inference_engine", lambda *_args, **_kwargs: engine)
     monkeypatch.setattr(evaluate_bi.LeRobotDataset, "create", lambda **_kwargs: dataset)
     monkeypatch.setattr(evaluate_bi, "log_say", lambda *_args: None)
+    # 此处只验证推理与反馈时序，不能启动受系统权限和真实时钟影响的键盘监听。
+    monkeypatch.setattr(evaluate_bi, "init_keyboard_listener", lambda: (None, {"exit_early": False, "stop_recording": False}))
     monkeypatch.setattr(
         "sys.argv",
         [
