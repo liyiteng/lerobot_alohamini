@@ -21,7 +21,8 @@ from ..config import RobotConfig
 
 
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
-    """Default camera config: single forward camera + wrist_right, 640x480."""
+    # 默认只开遥操作刚需的 2 路；另外 3 路已写好并注释，去掉行首的 " # " 即可启用。
+    # 开关方式：整条目注释 = 关闭，去掉注释 = 启用。
     return {
         "forward": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward",
@@ -37,53 +38,84 @@ def alohamini_cameras_config() -> dict[str, CameraConfig]:
             height=480,
             rotation=Cv2Rotation.NO_ROTATION,
         ),
+        # "backward": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_backward",
+        #     fps=30,
+        #     width=320,
+        #     height=240,
+        #     fourcc="MJPG",
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ),
+        # "wrist_left": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_wrist_left",
+        #     fps=30,
+        #     width=320,
+        #     height=240,
+        #     fourcc="MJPG",
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ),
+        # "chest": OpenCVCameraConfig(
+        #     index_or_path="/dev/am_camera_chest",
+        #     fps=30,
+        #     width=320,
+        #     height=240,
+        #     fourcc="MJPG",
+        #     rotation=Cv2Rotation.NO_ROTATION,
+        # ),
     }
-
-
 def alohamini2edu_cameras_config() -> dict[str, CameraConfig]:
-    """Binocular forward rig: forward_left + forward_right + wrist_right, 320x240.
-
-    Two physical sensors mounted side-by-side, each with its own USB port and
-    udev alias. Resolution is lowered to 320x240 because three UVC streams at
-    640x480 saturate the Raspberry Pi USB bus.
-
-    To disable a camera, comment out its entry. To enable it, remove the '#'.
-    """
+    # 双目前视 + 4 路机身相机，统一 320x240 MJPG / 15fps：6 路同时开才不超树莓派 USB 带宽。
+    # 开关方式：整条目注释 = 关闭，去掉注释 = 启用。
     return {
         "forward_left": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward_left",
-            fps=30,
+            fps=15,
             width=320,
             height=240,
+            fourcc="MJPG",
             rotation=Cv2Rotation.NO_ROTATION,
         ),
         "forward_right": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward_right",
-            fps=30,
+            fps=15,
             width=320,
             height=240,
+            fourcc="MJPG",
             rotation=Cv2Rotation.NO_ROTATION,
         ),
-        # "backward": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_backward", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "chest": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_chest", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        # "wrist_left": OpenCVCameraConfig(
-        #     index_or_path="/dev/am_camera_wrist_left", fps=30, width=320, height=240, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-        "wrist_right": OpenCVCameraConfig(
-            index_or_path="/dev/am_camera_wrist_right",
-            fps=30,
+        "backward": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_backward",
+            fps=15,
             width=320,
             height=240,
+            fourcc="MJPG",
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        "chest": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_chest",
+            fps=15,
+            width=320,
+            height=240,
+            fourcc="MJPG",
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        "wrist_left": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_wrist_left",
+            fps=15,
+            width=320,
+            height=240,
+            fourcc="MJPG",
+            rotation=Cv2Rotation.NO_ROTATION,
+        ),
+        "wrist_right": OpenCVCameraConfig(
+            index_or_path="/dev/am_camera_wrist_right",
+            fps=15,
+            width=320,
+            height=240,
+            fourcc="MJPG",
             rotation=Cv2Rotation.NO_ROTATION,
         ),
     }
-
-
-@RobotConfig.register_subclass("alohamini")
 @dataclass
 class AlohaMiniConfig(RobotConfig):
     left_port: str = "/dev/am_arm_follower_left"  # port to connect to the bus
