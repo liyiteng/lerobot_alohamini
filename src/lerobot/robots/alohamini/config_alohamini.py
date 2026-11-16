@@ -205,10 +205,14 @@ class AlohaMiniClientConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=alohamini_cameras_config)
 
     # Must exceed one host cycle at 50 Hz for request/reply observation transport.
-    polling_timeout_ms: int = 300
+    # 200 ms keeps alohamini1/2/2pro unchanged; edu gets a longer budget below.
+    polling_timeout_ms: int = 200
     connect_timeout_s: int = 5
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.robot_model == "alohamini2edu":
             object.__setattr__(self, "cameras", alohamini2edu_cameras_config())
+            object.__setattr__(
+                self, "polling_timeout_ms", max(self.polling_timeout_ms, 300)
+            )
