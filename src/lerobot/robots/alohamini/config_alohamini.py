@@ -21,8 +21,6 @@ from ..config import RobotConfig
 
 
 def alohamini_cameras_config() -> dict[str, CameraConfig]:
-    # 默认只开遥操作刚需的 2 路；另外 3 路已写好并注释，去掉行首的 " # " 即可启用。
-    # 开关方式：整条目注释 = 关闭，去掉注释 = 启用。
     return {
         "forward": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward",
@@ -63,9 +61,9 @@ def alohamini_cameras_config() -> dict[str, CameraConfig]:
         #     rotation=Cv2Rotation.NO_ROTATION,
         # ),
     }
+
+
 def alohamini2edu_cameras_config() -> dict[str, CameraConfig]:
-    # 双目前视 + 4 路机身相机，统一 320x240 MJPG / 15fps：6 路同时开才不超树莓派 USB 带宽。
-    # 开关方式：整条目注释 = 关闭，去掉注释 = 启用。
     return {
         "forward_left": OpenCVCameraConfig(
             index_or_path="/dev/am_camera_forward_left",
