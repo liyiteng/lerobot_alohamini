@@ -4,7 +4,7 @@ import argparse
 import logging
 
 from .alohamini import AlohaMini
-from .config_alohamini import AlohaMiniConfig
+from .config_alohamini import AlohaMini2EduConfig, AlohaMiniConfig
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -13,7 +13,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--robot_model",
         type=str,
         default="alohamini1",
-        choices=["alohamini1", "alohamini2", "alohamini2pro"],
+        choices=["alohamini1", "alohamini2", "alohamini2pro", "alohamini2edu"],
         help=(
             "Robot model. Must match the physical AlohaMini hardware: "
             "alohamini1, alohamini2, or alohamini2pro."
@@ -37,7 +37,13 @@ def main():
     args = make_parser().parse_args()
 
     logging.info("Configuring AlohaMini for calibration")
-    robot_config = AlohaMiniConfig()
+    if args.robot_model == "alohamini2edu":
+        robot_config = AlohaMini2EduConfig()
+        # Calibration only needs the arms; keep the cameras closed so a
+        # 6-camera bus does not fail before the arms are calibrated.
+        robot_config.cameras = {}
+    else:
+        robot_config = AlohaMiniConfig()
     robot_config.id = args.id
     robot_config.robot_model = args.robot_model
     robot_config.no_follower = args.no_follower

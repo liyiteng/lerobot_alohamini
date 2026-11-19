@@ -146,6 +146,43 @@ left_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_left", ...)
 right_arm_config=SOLeaderConfig(port="/dev/am_arm_leader_right", ...)
 ```
 
+## Persistent Camera Ports
+
+The forward binocular rig exposes two independent V4L2 nodes (one per sensor).
+Stable symlinks prevent left/right swap after reboot or USB re-plug. Run this
+on the Raspberry Pi / robot host where the cameras are plugged in.
+
+Identify each sensor's USB path (note which physical port corresponds to the
+left vs right lens):
+
+```bash
+ls -l /dev/v4l/by-path/
+udevadm info --attribute-walk --name=/dev/video0 | grep -E 'ATTRS\{(serial|idVendor|idProduct|product)\}'
+```
+
+Add rules to `/etc/udev/rules.d/90-mydevice.rules`. Match on each sensor's own
+USB serial (preferred) or on its physical USB path (`KERNELS=="..."`) so the
+two lenses never swap names:
+
+```udev
+SUBSYSTEM=="video4linux", ATTRS{serial}=="<forward_left_serial>", SYMLINK+="am_camera_forward_left"
+SUBSYSTEM=="video4linux", ATTRS{serial}=="<forward_right_serial>", SYMLINK+="am_camera_forward_right"
+SUBSYSTEM=="video4linux", ATTRS{serial}=="<wrist_right_serial>", SYMLINK+="am_camera_wrist_right"
+```
+
+Reload and verify:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+ls -l /dev/am_camera_*
+```
+
+The names above must match `alohamini_cameras_config()` in
+`src/lerobot/robots/alohamini/config_alohamini.py`. Each lens must be plugged
+into its own USB 2.0/3.0 port — do not share a hub between the two forward
+sensors, or frame drops will appear at 30 fps.
+
 ## Host Side
 
 Run these on the Raspberry Pi / robot host.
@@ -175,6 +212,16 @@ AlohaMini 2 Pro:
 ```bash
 python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2pro
 ```
+
+AlohaMini 2 EDU (binocular forward rig, 3 cameras at 320x240):
+
+```bash
+python -m lerobot.robots.alohamini.alohamini_host --robot_model alohamini2edu
+```
+
+To enable or disable cameras, edit `alohamini2edu_cameras_config()` in
+`src/lerobot/robots/alohamini/config_alohamini.py` and comment/uncomment the
+camera entries, then restart the host.
 
 Base and lift only:
 
@@ -227,6 +274,18 @@ AlohaMini 2 / 2 Pro with AM-ARM leader:
 python examples/alohamini/teleoperate_bi.py \
   --robot.remote_ip <Pi_IP> \
   --robot.robot_model alohamini2 \
+  --teleop.id am_leader_bi \
+  --teleop.arm_profile am-leader-6dof \
+  --fps 50 \
+  --camera-fps 30
+```
+
+AlohaMini 2 EDU with AM-ARM leader (binocular forward rig):
+
+```bash
+python examples/alohamini/teleoperate_bi.py \
+  --robot.remote_ip <Pi_IP> \
+  --robot.robot_model alohamini2edu \
   --teleop.id am_leader_bi \
   --teleop.arm_profile am-leader-6dof \
   --fps 50 \
@@ -309,6 +368,22 @@ python examples/alohamini/record_bi.py \
   --dataset.single_task "pickup1" \
   --robot.remote_ip <Pi_IP> \
   --robot.robot_model alohamini2 \
+  --teleop.id am_leader_bi \
+  --teleop.arm_profile am-leader-6dof
+```
+
+Create a dataset for AlohaMini 2 EDU (binocular forward rig):
+
+```bash
+python examples/alohamini/record_bi.py \
+  --dataset.repo_id $HF_USER/edu_bi_test \
+  --dataset.num_episodes 1 \
+  --dataset.fps 30 \
+  --dataset.episode_time_s 45 \
+  --dataset.reset_time_s 8 \
+  --dataset.single_task "pickup1" \
+  --robot.remote_ip <Pi_IP> \
+  --robot.robot_model alohamini2edu \
   --teleop.id am_leader_bi \
   --teleop.arm_profile am-leader-6dof
 ```
