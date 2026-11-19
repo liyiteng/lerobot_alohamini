@@ -11,7 +11,11 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 # ============ Parameter Section ============ #
 parser = argparse.ArgumentParser()
 parser.add_argument("--no_robot", action="store_true", help="Do not connect robot, only print actions")
-parser.add_argument("--no_leader", action="store_true", help="Do not connect leader arm, only perform keyboard-controlled actions.")
+parser.add_argument(
+    "--no_leader",
+    action="store_true",
+    help="Do not connect leader arm, only perform keyboard-controlled actions.",
+)
 parser.add_argument("--fps", type=int, default=50, help="Command/control frequency")
 parser.add_argument(
     "--camera-fps",
@@ -103,7 +107,7 @@ robot = AlohaMiniClient(robot_config)
 
 # Connection logic
 if not NO_ROBOT:
-    robot.connect()
+    robot.connect(include_cameras=False)
 else:
     print("🧪 robot.connect() skipped, only printing actions.")
 
@@ -114,6 +118,10 @@ else:
 
 keyboard.connect()
 
+if not NO_ROBOT:
+    # Leader setup may take longer than the feedback lifetime. Start control with
+    # fresh state requests, without a burst of prefetched camera responses.
+    robot.prime_observation_request_window(include_cameras=False)
 
 
 init_rerun(session_name="alohamini_teleop")
@@ -131,9 +139,7 @@ while True:
     if request_cameras:
         while next_camera_request_t <= t0:
             next_camera_request_t += camera_interval_s
-    observation = (
-        robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
-    )
+    observation = robot.get_observation(include_cameras=request_cameras) if not NO_ROBOT else {}
     arm_actions = leader.get_action() if not NO_LEADER else {}
     arm_actions = {f"arm_{k}": v for k, v in arm_actions.items()}
     keyboard_keys = keyboard.get_action()

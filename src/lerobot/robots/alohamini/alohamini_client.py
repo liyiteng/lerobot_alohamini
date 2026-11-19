@@ -65,6 +65,7 @@ class AlohaMiniClient(Robot):
         self.observation_request_window = config.observation_request_window
         if self.observation_request_window < 1:
             raise ValueError("observation_request_window must be at least 1")
+        self._active_observation_request_window = self.observation_request_window
 
         self.zmq_context = None
         self.zmq_cmd_socket = None
@@ -155,10 +156,10 @@ class AlohaMiniClient(Robot):
         pass
 
     @check_if_already_connected
-    def connect(self) -> None:
-        """Establishes ZMQ sockets with the remote mobile robot"""
+    def connect(self, *, include_cameras: bool = True) -> None:
+        """Establish ZMQ sockets and prefetch the requested observation kind."""
         try:
-            self._connect()
+            self._connect(include_cameras=include_cameras)
         except BaseException:
             if self.zmq_observation_socket is not None:
                 self.zmq_observation_socket.close(linger=0)
@@ -168,8 +169,9 @@ class AlohaMiniClient(Robot):
                 self.zmq_context.term()
             raise
 
-    def _connect(self) -> None:
+    def _connect(self, *, include_cameras: bool = True) -> None:
         zmq = self._zmq
+        self._active_observation_request_window = self.observation_request_window
         self.zmq_context = zmq.Context()
         self.zmq_cmd_socket = self.zmq_context.socket(zmq.PUSH)
         # Socket options that control queueing must be set before connect().
@@ -187,7 +189,7 @@ class AlohaMiniClient(Robot):
         zmq_observations_locator = f"tcp://{self.remote_ip}:{self.port_zmq_observations}"
         self.zmq_observation_socket.connect(zmq_observations_locator)
 
-        handshake_message = self._request_observation(self.connect_timeout_s * 1000)
+        handshake_message = self._request_observation(self.connect_timeout_s * 1000, include_cameras=False)
         if handshake_message is None:
             raise DeviceNotConnectedError("Timeout waiting for AlohaMini Host to connect expired.")
 
@@ -200,7 +202,7 @@ class AlohaMiniClient(Robot):
         # The handshake proves that the Host is available, but it may become stale while
         # the remaining teleoperation devices connect. Discard it and fill a bounded request
         # window for frames that get_observation() will consume.
-        self._fill_observation_request_window()
+        self._fill_observation_request_window(include_cameras=include_cameras)
 
         self._is_connected = True
 
@@ -261,16 +263,16 @@ class AlohaMiniClient(Robot):
                     self._response_includes_cameras = not request_token.endswith(b":state")
                     return response[1:]
 
-    def _request_observation(self, timeout_ms: int) -> list[bytes] | None:
+    def _request_observation(self, timeout_ms: int, *, include_cameras: bool = True) -> list[bytes] | None:
         """Send and synchronously receive one observation request."""
-        request_token = self._send_observation_request()
+        request_token = self._send_observation_request(include_cameras=include_cameras)
         if request_token is None:
             return None
         return self._receive_observation_response(request_token, timeout_ms)
 
     def _fill_observation_request_window(self, *, include_cameras: bool = True) -> None:
         """Keep a bounded number of requests in flight to cover transport latency."""
-        while len(self._observation_request_tokens) < self.observation_request_window:
+        while len(self._observation_request_tokens) < self._active_observation_request_window:
             request_token = self._send_observation_request(include_cameras=include_cameras)
             if request_token is None:
                 break
@@ -308,19 +310,29 @@ class AlohaMiniClient(Robot):
         if not self._observation_request_tokens:
             self._fill_observation_request_window(include_cameras=include_cameras)
 
-        message = (
-            self._receive_observation_response(
-                self._observation_request_tokens.popleft(), self.polling_timeout_ms
-            )
-            if self._observation_request_tokens
-            else None
-        )
+        if not self._observation_request_tokens:
+            return None
+
+        request_token = self._observation_request_tokens[0]
+        requested_at = self._request_times.get(request_token)
+        message = self._receive_observation_response(request_token, self.polling_timeout_ms)
+        request_age_s = time.monotonic() - requested_at if requested_at is not None else float("inf")
+        if self._active_observation_request_window > 1 and (
+            message is None or request_age_s >= self.polling_timeout_ms / 1000
+        ):
+            # A pipelined image burst can consume the entire feedback lifetime on Wi-Fi.
+            # Drain existing credits, then request one response at a time for this connection.
+            self._active_observation_request_window = 1
+            logging.warning("Slow observation link; reducing request window to 1.")
         if message is None:
-            logging.info("No new data available within timeout.")
-            # A missing response may make the remaining ordered tokens ambiguous.
-            # Drop local bookkeeping; later responses are rejected by token matching.
-            self._observation_request_tokens.clear()
+            # A poll timeout is not a lost response: keep matching the same token across
+            # control cycles. Discard only this request once its feedback lifetime expires.
+            # This avoids repeatedly requesting images while ignoring their delayed replies.
+            if request_age_s >= self.latest_safety_status.get("command_watchdog_timeout_s", 1.0):
+                self._observation_request_tokens.popleft()
+                self._request_times.pop(request_token, None)
         else:
+            self._observation_request_tokens.popleft()
             # Replenish before decoding the current frame so Host work and transport overlap
             # JPEG decoding, teleoperation, action sending, and dataset I/O.
             self._fill_observation_request_window(include_cameras=include_cameras)

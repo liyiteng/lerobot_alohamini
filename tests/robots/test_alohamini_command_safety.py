@@ -241,7 +241,8 @@ def test_client_does_not_send_when_control_belongs_to_ros():
     client.zmq_cmd_socket.send_string.assert_not_called()
 
 
-def test_first_pc_command_uses_identity_from_handshake():
+@pytest.mark.parametrize("include_cameras", [True, False])
+def test_first_pc_command_uses_identity_from_handshake(include_cameras):
     client = object.__new__(AlohaMiniClient)
     client._is_connected = False
     client._feedback_valid = False
@@ -255,11 +256,13 @@ def test_first_pc_command_uses_identity_from_handshake():
     client.port_zmq_observations = 5556
     client.observation_request_window = 3
     client.connect_timeout_s = 1
-    client._request_observation = lambda _timeout: [
-        json.dumps({"_safety": status(control_owner=None)}).encode()
-    ]
+    client._request_observation = Mock(
+        return_value=[json.dumps({"_safety": status(control_owner=None)}).encode()]
+    )
     client._fill_observation_request_window = Mock()
-    client.connect()
+    client.connect(include_cameras=include_cameras)
+    client._request_observation.assert_called_once_with(1000, include_cameras=False)
+    client._fill_observation_request_window.assert_called_once_with(include_cameras=include_cameras)
     assert client.send_action({"joint.pos": 1.0}) == {}
     client.zmq_cmd_socket.send_string.assert_not_called()
     client._feedback_valid = True
